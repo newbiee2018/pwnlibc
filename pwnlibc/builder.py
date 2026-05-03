@@ -178,24 +178,11 @@ def build_glibc(
             if result2.returncode != 0:
                 raise RuntimeError(f"make install failed:\n{result2.stderr[-2000:]}")
 
-    also_save_source = glibc_dir / version / "source"
-    if not also_save_source.exists():
-        also_save_source.mkdir(parents=True, exist_ok=True)
-        src_url = GNU_SOURCE_URL.format(version=version)
-        try:
-            tarball2 = also_save_source / f"glibc-{version}.tar.xz"
-            req = urllib.request.Request(src_url, headers={"User-Agent": "pwnlibc/0.1"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                with open(tarball2, "wb") as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-            subprocess.run(["tar", "xf", str(tarball2), "-C", str(also_save_source)],
-                            check=True, capture_output=True)
-            tarball2.unlink()
-        except Exception:
-            pass
+        # Save source for GDB before temp dir is cleaned up
+        save_source = glibc_dir / version / "source"
+        if not save_source.exists():
+            save_source.mkdir(parents=True, exist_ok=True)
+            if src_dir.is_dir():
+                shutil.copytree(src_dir, save_source / src_dir.name)
 
     return out_prefix

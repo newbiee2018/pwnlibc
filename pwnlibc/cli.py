@@ -381,6 +381,8 @@ def _rmtree_verbose(path: Path, label: str) -> None:
 def remove(ctx, versions, arch, variant, keep_cache):
     """Remove installed glibc versions.
 
+    Source is auto-removed when no deb/built variant remains for that version.
+
     Examples:
 
       pwnlibc remove 2.31
@@ -423,6 +425,18 @@ def remove(ctx, versions, arch, variant, keep_cache):
             if source_dir.is_dir():
                 _rmtree_verbose(source_dir, "source")
                 removed_any = True
+
+        # Auto-remove source when no deb/built remains
+        if variant not in ("source", "all") and ver_dir.is_dir():
+            has_lib = any(
+                d.is_dir() and d.name != "source" and not d.name.startswith(".")
+                for d in ver_dir.iterdir()
+            )
+            if not has_lib:
+                source_dir = ver_dir / "source"
+                if source_dir.is_dir():
+                    _rmtree_verbose(source_dir, "source (no variants left)")
+                    removed_any = True
 
         if not keep_cache and variant in ("deb", "all"):
             cache_dir = glibc_dir / ".cache"
