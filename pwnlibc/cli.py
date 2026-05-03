@@ -224,7 +224,6 @@ def available(ctx, arch, mirror):
     table.add_column("#", style="dim")
     table.add_column("Version", style="bold")
     table.add_column("Arch")
-    table.add_column("Debug .deb", justify="center")
     table.add_column("Installed", justify="center")
 
     entries: list[tuple[str, str, DebPackage]] = []
@@ -232,14 +231,13 @@ def available(ctx, arch, mirror):
     for ver in sorted(by_version.keys(), key=lambda v: parse_version(v)):
         for a in sorted(by_version[ver].keys()):
             pkg = by_version[ver][a]
-            has_dbg = "[green]yes[/green]" if pkg.dbg_filename else "[yellow]no[/yellow]"
 
             if (ver, a) in installed_ver_arch:
                 inst_str = "[green]yes[/green]"
             else:
                 inst_str = "[dim]-[/dim]"
 
-            table.add_row(str(idx), ver, a, has_dbg, inst_str)
+            table.add_row(str(idx), ver, a, inst_str)
             entries.append((ver, a, pkg))
             idx += 1
 
