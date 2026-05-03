@@ -12,4 +12,4 @@ RUN pip3 install --break-system-packages pytest 2>/dev/null || pip3 install pyte
 
 COPY . .
 ENV PYTHONPATH=/pwnlibc
-CMD ["python3", "-m", "pytest", "tests/", "-v", "--tb=short"]
+CMD ["python3", "-m", "pytest", "tests/", "-v", "--tb=short", "-m", "not network and not slow"]

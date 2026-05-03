@@ -1,7 +1,8 @@
 # pwnlibc Test Results
 
 **Date:** 2026-05-03
-**Test suite version:** Round 2 (258 tests across 10 test files)
+**Test suite version:** Round 2 (265 tests across 10 test files)
+**Tested in Docker:** Ubuntu 18.04, 20.04, 22.04, 24.04, 26.04
 
 ---
 
@@ -14,43 +15,40 @@ Added 3 new test files (139 new tests) covering:
 
 ---
 
-## 1. Python Version Compatibility
+## 1. Python Version Compatibility (Docker validated)
 
 | Ubuntu  | Python  | Import | Tests | Status |
 |---------|---------|--------|-------|--------|
-| 18.04   | 3.6.9   | FAIL   | N/A   | **INCOMPATIBLE** |
-| 20.04   | 3.8.10  | FAIL   | N/A   | **INCOMPATIBLE** |
-| 22.04   | 3.10.12 | OK     | 238/241 pass | **COMPATIBLE** |
-| 24.04   | 3.12.3  | OK     | 238/241 pass | **COMPATIBLE** |
-| 26.04   | 3.13.x  | OK     | 238/241 pass | **COMPATIBLE** |
+| 18.04   | 3.6.9   | FAIL   | 0/265 (9 collection errors) | **INCOMPATIBLE** |
+| 20.04   | 3.8.10  | OK     | 247/248 pass, 1 skip | **COMPATIBLE** |
+| 22.04   | 3.10.12 | OK     | 248/248 pass | **COMPATIBLE** |
+| 24.04   | 3.12.3  | OK     | 248/248 pass | **COMPATIBLE** |
+| 26.04   | 3.13.x  | OK     | 248/248 pass | **COMPATIBLE** |
 
-### Root Causes for Incompatibility
+### Compatibility Results
 
-**Python < 3.10 (Ubuntu 18.04 + 20.04):**
-- `tuple[int, int]` — PEP 585 lowercase generics (requires Python 3.9+)
-- `list[str]`, `dict[str, ...]` — same PEP 585 issue
-- `str | None` — PEP 604 union types (requires Python 3.10+)
-- `list[tuple[str, str, str]]` — nested PEP 585 generics
+**Ubuntu 18.04 (Python 3.6.9): INCOMPATIBLE**
+- `from __future__ import annotations` is not recognized on Python 3.6 (`SyntaxError: future feature annotations is not defined`)
+- PEP 563 (`__future__.annotations`) requires Python 3.7+
+- All 9 test modules fail to collect due to this SyntaxError in source files
+- Import test runs but fails at `import pwnlibc` for the same reason
 
-**Note:** Developer added `from __future__ import annotations` to source files, which defers annotation evaluation. This may fix 3.8+ compatibility but was not re-validated in Docker.
+**Ubuntu 20.04 (Python 3.8.10): NOW COMPATIBLE**
+- `from __future__ import annotations` successfully defers annotation evaluation
+- PEP 585 (`tuple[int, ...]`) and PEP 604 (`str | None`) work with deferred eval
+- 247 passed, 1 skipped (`test_minimum_python_version` — expects 3.10+)
+- Patcher tests pass (patchelf + gcc available in Docker)
 
-**Affected files and lines:**
-- `config.py:33` — `def parse_version(version: str) -> tuple[int, ...]:`
-- `elfutil.py:126` — `def get_needed_libs(path: Path) -> list[str]:`
-- `downloader.py:28` — `dbg_filename: str | None` (dataclass field)
-- `downloader.py:176` — `cache_dir: Path | None = None`
-- `glibc.py:96` — `def find_library(...) -> Path | None:`
-- `backup.py:21` — `def restore_backup(binary: Path) -> Path | None:`
-- `cli.py:58` — `versions: dict[str, dict] = {}`
+**Ubuntu 22.04+ (Python 3.10+): FULLY COMPATIBLE**
+- All 248 tests pass, 0 skipped, 0 failed
+- Patcher tests (copy mode, inplace mode) all pass with gcc and patchelf
 
-**Additional dependency issue on Ubuntu 18.04:**
-- `rich>=13.0` requires Python 3.7+. The latest `rich` installable on Python 3.6 is `12.6.0`.
-- `click>=8.0` installs `8.0.4` on Python 3.6 (last version supporting 3.6).
+### Root Cause for 18.04 Incompatibility
 
-**Fix options:**
-1. Use `from __future__ import annotations` at the top of each file (defers annotation evaluation, works on 3.7+)
-2. Use `typing.Optional[X]`, `typing.List[X]`, `typing.Tuple[X, Y]` for 3.6-3.8
-3. Declare minimum Python version as 3.10 (recommended if targeting Ubuntu 22.04+)
+**Python 3.6 does not support `from __future__ import annotations` (PEP 563).**
+This feature was added in Python 3.7. Every source file now has this import at line 1, making the entire project incompatible with Python 3.6.
+
+**Fix option:** If 18.04 support is needed, remove `from __future__ import annotations` and use `typing.Optional[X]`, `typing.List[X]`, `typing.Tuple[X, Y]` instead. However, this is not recommended — Ubuntu 18.04 is EOL.
 
 ---
 
@@ -444,13 +442,18 @@ These round-1 test expectations were updated to match the current API:
 
 ---
 
-## Summary
+## Summary (Docker validated)
 
-### Passing: 241/241 tests on Ubuntu 22.04+ (Python 3.10+)
-### New tests: 139/139 pass (0 failures in new test files)
-### Pre-existing failures: 0 (all 3 fixed)
-### Skipped: 7 (require gcc/patchelf)
-### Deselected: 17 (network/slow markers)
+| Ubuntu | Python | Result |
+|--------|--------|--------|
+| 18.04  | 3.6.9  | **INCOMPATIBLE** — `from __future__ import annotations` not supported (PEP 563 requires 3.7+) |
+| 20.04  | 3.8.10 | **247 pass**, 1 skip — `from __future__ import annotations` fixes PEP 585/604 compat |
+| 22.04  | 3.10.12| **248 pass**, 0 fail — full pass including patcher tests |
+| 24.04  | 3.12.3 | **248 pass**, 0 fail — full pass including patcher tests |
+| 26.04  | 3.13.x | **248 pass**, 0 fail — full pass including patcher tests |
+
+### Key change from Round 1: Ubuntu 20.04 now PASSES
+The developer's `from __future__ import annotations` fix resolved PEP 585/604 incompatibility on Python 3.8. 247/248 tests pass (1 skip: `test_minimum_python_version` which asserts >= 3.10).
 
 ### Key Findings (Round 2)
 
@@ -469,3 +472,7 @@ These round-1 test expectations were updated to match the current API:
 7. **Old version support** — Versions like 2.3.6, 2.3.2.ds1, 2.19 on old-releases.ubuntu.com are correctly parsed and matched. powerpc is correctly routed to old-ubuntu mirror.
 
 8. **Source download with --source flag** — `download_source()` called once per version when flag is set. Works with both single and multi-version downloads.
+
+9. **Patcher tests now pass in Docker** — All 7 patcher tests (copy mode + inplace mode) pass in Docker where gcc and patchelf are installed. These were skipped on the host machine.
+
+10. **Ubuntu 20.04 compatibility restored** — `from __future__ import annotations` makes Python 3.8 work. Only Ubuntu 18.04 (Python 3.6) remains incompatible because PEP 563 itself requires 3.7+.

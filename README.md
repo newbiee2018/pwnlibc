@@ -44,13 +44,13 @@ sudo pwnlibc download-all --arch amd64
 # List what you have
 pwnlibc list
 
-# Patch a CTF binary
+# Patch a CTF binary (creates vuln.patched)
 pwnlibc patch ./vuln -v 2.31
 
 # Done — run it
-./vuln
+./vuln.patched
 
-# Restore the original
+# Clean up
 pwnlibc restore ./vuln
 
 # Build from source with full debug symbols
@@ -139,6 +139,8 @@ Creates a separate `<arch>-built` variant under `/glibc/<version>/`. This coexis
 | powerpc | `gcc-powerpc-linux-gnu` |
 | s390x | `gcc-s390x-linux-gnu` |
 | riscv64 | `gcc-riscv64-linux-gnu` |
+| mipsel | `gcc-mipsel-linux-gnu` |
+| mips64el | `gcc-mips64el-linux-gnuabi64` |
 
 Plus: `make`, `gawk`, `bison`, `python3`.
 
@@ -149,38 +151,27 @@ Plus: `make`, `gawk`, `bison`, `python3`.
 
 ### `pwnlibc patch BINARY`
 
-Patch an ELF binary to use a specific glibc version.
+Patch an ELF binary to use a specific glibc version. Creates `<binary>.patched` — the original is never modified.
 
 ```bash
-pwnlibc patch ./vuln -v 2.27                        # copy mode (default)
-pwnlibc patch ./vuln -v 2.35 -m inplace              # inplace mode
-pwnlibc patch ./vuln -v 2.27 --no-backup             # skip backup
+pwnlibc patch ./vuln -v 2.31                         # inplace mode (default)
+pwnlibc patch ./vuln -v 2.27 -m copy                 # copy mode
 pwnlibc patch ./vuln -v 2.27 -a i686                 # force 32-bit
 pwnlibc patch ./vuln -v 2.31 --variant built          # use source-built variant
 ```
 
-**Copy mode** (default): Copies `libc-<ver>.so`, `ld-<ver>.so`, and any other NEEDED libraries to the binary's directory. Patches the binary with relative paths. The binary must be run from its directory.
+**Inplace mode** (default): Sets the ELF interpreter and RPATH to absolute paths pointing at `/glibc/<ver>/<arch>/lib/`. No files copied. The binary can be run from anywhere. GDB finds debug symbols automatically via `.debug/` in the glibc install.
 
-**Inplace mode**: Sets the ELF interpreter and RPATH to absolute paths pointing at `/glibc/<ver>/<arch>/lib/`. No files copied. The binary can be run from anywhere, but breaks if `/glibc/` is moved.
+**Copy mode**: Copies `libc-<ver>.so`, `ld-<ver>.so`, debug symbols, and any other NEEDED libraries to the binary's directory. Patches the binary with relative paths. The binary must be run from its directory.
 
-Architecture is auto-detected from the ELF header. A `.bak` backup is created before patching (auto-numbered if multiple patches).
+Architecture is auto-detected from the ELF header.
 
 ### `pwnlibc restore BINARY`
 
-Restore a binary from its most recent backup.
+Remove the `.patched` file created by `pwnlibc patch`. Also supports legacy `.bak` backups.
 
 ```bash
 pwnlibc restore ./vuln
-```
-
-### `pwnlibc update`
-
-Find and download all glibc versions available on mirrors but not yet installed.
-
-```bash
-pwnlibc update --check        # dry run
-pwnlibc update                # download all missing (x86)
-pwnlibc update --arch arm64   # update arm64
 ```
 
 ### `pwnlibc verify`
@@ -252,8 +243,12 @@ pwnlibc info ./vuln
 | IBM z/Arch | `s390x` | ports.ubuntu.com | cross | 2.23+ |
 | RISC-V 64-bit | `riscv64` | ports.ubuntu.com | cross | 2.31+ |
 | PowerPC 32-bit | `powerpc` | old-releases.ubuntu.com | cross | 2.3-2.24 (discontinued) |
+| MIPS 32-bit LE | `mipsel` | deb.debian.org | cross | 2.28+ (Debian) |
+| MIPS 64-bit LE | `mips64el` | deb.debian.org | cross | 2.28+ (Debian) |
 
 Older versions (2.3.x, 2.4, 2.5, 2.7, 2.9, 2.19, 2.21) are available on `old-releases.ubuntu.com` for x86 and powerpc. Use `--mirror old-ubuntu` to access them.
+
+**MIPS from Debian**: mipsel/mips64el packages come from Debian mirrors (same .deb format). Use `--mirror debian` or `--mirror old-debian` for EOL releases. Bookworm (2.36) is the last Debian release with native MIPS.
 
 **Cross-architecture patching**: `patchelf` works on any architecture from any host — it manipulates ELF headers without executing the binary.
 
@@ -261,9 +256,8 @@ Older versions (2.3.x, 2.4, 2.5, 2.7, 2.9, 2.19, 2.21) are available on `old-rel
 ```bash
 sudo apt install qemu-user qemu-user-static
 qemu-aarch64 ./arm_binary      # after patching with pwnlibc
+qemu-mipsel ./mips_binary      # MIPS little-endian
 ```
-
-**MIPS**: Not on Ubuntu mirrors. Debian ships mipsel/mips64el at `ftp.debian.org` (glibc 2.36). Older versions via [snapshot.debian.org](https://snapshot.debian.org/). Not automated by pwnlibc yet.
 
 ## Glibc 2.34 naming change
 
@@ -287,7 +281,7 @@ Handled transparently. In copy mode, libs are always renamed to `libc-<ver>.so` 
 3. Download and patch:
    ```bash
    pwnlibc download 2.31
-   pwnlibc patch ./vuln -v 2.31
+   pwnlibc patch ./vuln -v 2.31    # creates vuln.patched
    ```
 
 4. Need full debug symbols for heap analysis? Build from source:
@@ -298,7 +292,7 @@ Handled transparently. In copy mode, libs are always renamed to `libc-<ver>.so` 
 
 5. Debug with GDB + source:
    ```bash
-   gdb ./vuln
+   gdb ./vuln.patched
    # Source at /glibc/2.31/source/glibc-2.31/malloc/malloc.c
    ```
 

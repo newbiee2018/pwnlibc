@@ -42,8 +42,8 @@ class TestCliHelp:
         assert result.exit_code == 0
         assert "--mirror" in result.output
 
-    def test_update_help(self, runner):
-        result = runner.invoke(cli, ["update", "--help"])
+    def test_download_all_help(self, runner):
+        result = runner.invoke(cli, ["download-all", "--help"])
         assert result.exit_code == 0
         assert "--check" in result.output
 
@@ -150,17 +150,17 @@ class TestCliDownload:
         assert "not found" in result.output
 
 
-class TestCliUpdate:
+class TestCliDownloadAll:
     @patch("pwnlibc.downloader._fetch_index")
-    def test_update_check_dry_run(self, mock_fetch, runner, populated_glibc_dir):
+    def test_download_all_check_dry_run(self, mock_fetch, runner, populated_glibc_dir):
         from tests.conftest import SAMPLE_MIRROR_HTML
         mock_fetch.return_value = SAMPLE_MIRROR_HTML
         result = runner.invoke(cli, [
             "--glibc-dir", str(populated_glibc_dir),
-            "update", "--check",
+            "download-all", "--check",
         ])
         assert result.exit_code == 0
-        assert "Missing versions" in result.output or "would be downloaded" in result.output
+        assert "entries to download" in result.output or "already installed" in result.output
 
 
 class TestCliModuleEntry:

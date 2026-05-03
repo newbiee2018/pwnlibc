@@ -30,6 +30,12 @@ _MACHINE_MAP = {
     (243, ELFCLASS64): "riscv64",
 }
 
+# EM_MIPS=8 is shared by mipsel/mips64el; disambiguate via class+endianness
+_MIPS_MAP = {
+    (ELFCLASS32, ELFDATA2LSB): "mipsel",
+    (ELFCLASS64, ELFDATA2LSB): "mips64el",
+}
+
 
 def detect_arch(path: Path) -> str:
     with open(path, "rb") as f:
@@ -39,12 +45,17 @@ def detect_arch(path: Path) -> str:
         ei_class = struct.unpack("B", f.read(1))[0]
         ei_data = struct.unpack("B", f.read(1))[0]
         f.seek(18)
-        # e_machine is always at offset 18; use host endian based on ei_data
         raw = f.read(2)
         if ei_data == ELFDATA2MSB:
             e_machine = struct.unpack(">H", raw)[0]
         else:
             e_machine = struct.unpack("<H", raw)[0]
+
+    if e_machine == 8:
+        arch = _MIPS_MAP.get((ei_class, ei_data))
+        if arch is None:
+            raise ValueError(f"Unsupported MIPS variant: class={ei_class}, endian={ei_data}")
+        return arch
 
     key = (e_machine, ei_class)
     arch = _MACHINE_MAP.get(key)

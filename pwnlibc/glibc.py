@@ -54,10 +54,13 @@ def resolve_lib_paths(version: str, arch: str, glibc_dir: Path,
     lib_dir = base_dir / "lib"
 
     if not lib_dir.is_dir():
-        # built variants may nest under usr/lib or the prefix structure
-        alt = base_dir / "usr" / "lib"
-        if alt.is_dir():
-            lib_dir = alt
+        for alt in [
+            base_dir / "usr" / "lib",
+            base_dir / glibc_dir.name / version / f"{arch}-built" / "lib",
+        ]:
+            if alt.is_dir():
+                lib_dir = alt
+                break
         else:
             raise FileNotFoundError(
                 f"Glibc {version} ({arch}, {variant}) not found at {lib_dir}. "

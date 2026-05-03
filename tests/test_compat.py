@@ -1,8 +1,7 @@
 """Tests for Python version compatibility.
 
 These tests verify whether pwnlibc can be imported on the current Python
-version. On older Pythons (< 3.10) that lack PEP 604 union types and
-PEP 585 lowercase generics, import will fail with SyntaxError.
+version. Requires Python 3.7+ (PEP 563: from __future__ import annotations).
 """
 
 import sys
@@ -17,7 +16,7 @@ class TestPythonVersionCompat:
         print(f"Python version tuple: {sys.version_info[:3]}")
 
     def test_import_pwnlibc(self):
-        """Core import test — fails on Python < 3.10 due to type hint syntax."""
+        """Core import test — fails on Python < 3.7 (no PEP 563)."""
         import pwnlibc
         assert hasattr(pwnlibc, "__version__")
 
@@ -60,10 +59,10 @@ class TestPythonVersionCompat:
 
     def test_minimum_python_version(self):
         """Document the minimum required Python version."""
-        if sys.version_info < (3, 10):
+        if sys.version_info < (3, 7):
             pytest.skip(
                 f"Python {'.'.join(map(str, sys.version_info[:3]))} is below "
-                f"minimum required 3.10 (PEP 604 union types, PEP 585 generics)"
+                f"minimum required 3.7 (PEP 563: from __future__ import annotations)"
             )
 
 

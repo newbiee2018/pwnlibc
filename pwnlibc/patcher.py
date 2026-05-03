@@ -8,6 +8,8 @@ from pathlib import Path
 from .elfutil import get_needed_libs
 from .glibc import GlibcInstall, find_library
 
+PATCHED_SUFFIX = ".patched"
+
 
 def _run_patchelf(args: list[str]):
     result = subprocess.run(
@@ -29,6 +31,33 @@ def _copy_lib(src: Path, dst: Path):
     os.chmod(dst, 0o755)
 
 
+def _make_patched_copy(binary: Path) -> Path:
+    patched = binary.parent / (binary.name + PATCHED_SUFFIX)
+    shutil.copy2(binary, patched)
+    os.chmod(patched, 0o755)
+    return patched
+
+
+def _copy_debug_files(glibc: GlibcInstall, copied_libs: list[Path], target_dir: Path):
+    debug_dir = glibc.lib_dir / ".debug"
+    if not debug_dir.is_dir():
+        return 0
+    target_debug = target_dir / ".debug"
+    target_debug.mkdir(exist_ok=True)
+    count = 0
+    for lib in copied_libs:
+        dbg_src = debug_dir / lib.name
+        if not dbg_src.exists():
+            for candidate in debug_dir.iterdir():
+                if candidate.name.startswith(lib.name.split("-")[0]):
+                    dbg_src = candidate
+                    break
+        if dbg_src.exists():
+            shutil.copy2(dbg_src, target_debug / lib.name)
+            count += 1
+    return count
+
+
 def _collect_extra_libs(binary: Path, glibc: GlibcInstall) -> list[tuple[str, Path]]:
     skip = {"libc.so.6", glibc.ld_path.name}
     if not glibc.new_naming:
@@ -46,9 +75,10 @@ def _collect_extra_libs(binary: Path, glibc: GlibcInstall) -> list[tuple[str, Pa
     return extra
 
 
-def patch_copy(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> list[Path]:
+def patch_copy(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> tuple[Path, list[Path]]:
     _check_patchelf()
-    target_dir = binary.parent
+    patched = _make_patched_copy(binary)
+    target_dir = patched.parent
     copied_files = []
 
     libc_copy = f"libc-{glibc.version}.so"
@@ -58,33 +88,38 @@ def patch_copy(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> lis
     _copy_lib(glibc.ld_path, target_dir / ld_copy)
     copied_files.extend([target_dir / libc_copy, target_dir / ld_copy])
 
-    extra = _collect_extra_libs(binary, glibc)
+    extra = _collect_extra_libs(patched, glibc)
     for soname, lib_path in extra:
         copy_name = lib_path.name
         _copy_lib(lib_path, target_dir / copy_name)
         copied_files.append(target_dir / copy_name)
 
+    _copy_debug_files(glibc, copied_files, target_dir)
+
     _run_patchelf([
-        "--replace-needed", "libc.so.6", f"./{libc_copy}", str(binary),
+        "--replace-needed", "libc.so.6", libc_copy, str(patched),
     ])
-    _run_patchelf(["--set-interpreter", f"./{ld_copy}", str(binary)])
+    _run_patchelf(["--set-interpreter", f"./{ld_copy}", str(patched)])
 
     for soname, lib_path in extra:
         _run_patchelf([
-            "--replace-needed", soname, f"./{lib_path.name}", str(binary),
+            "--replace-needed", soname, lib_path.name, str(patched),
         ])
 
     if set_rpath:
-        _run_patchelf(["--set-rpath", ".", str(binary)])
+        _run_patchelf(["--set-rpath", ".", str(patched)])
 
-    return copied_files
+    return patched, copied_files
 
 
-def patch_inplace(binary: Path, glibc: GlibcInstall, set_rpath: bool = True):
+def patch_inplace(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> Path:
     _check_patchelf()
+    patched = _make_patched_copy(binary)
 
     interp = str(glibc.ld_path.resolve())
-    _run_patchelf(["--set-interpreter", interp, str(binary)])
+    _run_patchelf(["--set-interpreter", interp, str(patched)])
 
     if set_rpath:
-        _run_patchelf(["--set-rpath", str(glibc.lib_dir), str(binary)])
+        _run_patchelf(["--set-rpath", str(glibc.lib_dir), str(patched)])
+
+    return patched

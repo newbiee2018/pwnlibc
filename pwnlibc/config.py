@@ -77,6 +77,26 @@ ARCH_INFO = {
         "cross_gcc": "gcc-powerpc-linux-gnu",
         "cross_triplet": "powerpc-linux-gnu",
     },
+    "mipsel": {
+        "elf_machine": 8,
+        "elf_class": 1,
+        "ld_soname": "ld.so.1",
+        "deb_arch": "mipsel",
+        "deb_lib_dir": "mipsel-linux-gnu",
+        "mirror": "debian",
+        "cross_gcc": "gcc-mipsel-linux-gnu",
+        "cross_triplet": "mipsel-linux-gnu",
+    },
+    "mips64el": {
+        "elf_machine": 8,
+        "elf_class": 2,
+        "ld_soname": "ld.so.1",
+        "deb_arch": "mips64el",
+        "deb_lib_dir": "mips64el-linux-gnuabi64",
+        "mirror": "debian",
+        "cross_gcc": "gcc-mips64el-linux-gnuabi64",
+        "cross_triplet": "mips64el-linux-gnuabi64",
+    },
 }
 
 # Back-fill cross-compiler info for arches that don't have it yet
@@ -100,6 +120,8 @@ MIRRORS = {
     "old-ubuntu": "http://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc/",
     "tsinghua": "https://mirror.tuna.tsinghua.edu.cn/ubuntu/pool/main/g/glibc/",
     "ports": "http://ports.ubuntu.com/pool/main/g/glibc/",
+    "debian": "http://deb.debian.org/debian/pool/main/g/glibc/",
+    "old-debian": "http://archive.debian.org/debian/pool/main/g/glibc/",
 }
 
 GNU_SOURCE_URL = "https://ftp.gnu.org/gnu/glibc/glibc-{version}.tar.xz"

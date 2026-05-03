@@ -111,7 +111,7 @@ def build_glibc(
 
         configure_args = [
             str(src_dir / "configure"),
-            f"--prefix={out_prefix}",
+            "--prefix=/",
             "--disable-werror",
             "--enable-debug=yes",
         ]

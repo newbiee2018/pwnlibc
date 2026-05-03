@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from .backup import create_backup, restore_backup
+from .backup import restore_backup
 from .config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, DEFAULT_GLIBC_DIR, X86_ARCHES, parse_version, uses_new_naming
 from .downloader import (
     DebPackage,
@@ -33,7 +34,19 @@ from .patcher import patch_copy, patch_inplace
 
 console = Console()
 
-ALL_MIRRORS = ["ubuntu", "old-ubuntu", "tsinghua", "ports", "auto"]
+ALL_MIRRORS = ["ubuntu", "old-ubuntu", "tsinghua", "ports", "debian", "old-debian", "auto"]
+
+
+def _check_writable(glibc_dir: Path) -> None:
+    if not glibc_dir.exists():
+        console.print(f"[red]Glibc directory {glibc_dir} does not exist.[/red]")
+        console.print(f"[dim]Run: sudo mkdir -p {glibc_dir} && sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
+        console.print(f"[dim]Or run: bash install.sh[/dim]")
+        sys.exit(1)
+    if not os.access(glibc_dir, os.W_OK):
+        console.print(f"[red]No write permission on {glibc_dir}.[/red]")
+        console.print(f"[dim]Run: sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
+        sys.exit(1)
 
 
 def _mirror_for_arch(arch: str) -> str:
@@ -64,7 +77,7 @@ def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
 # CLI group
 # ---------------------------------------------------------------------------
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.option(
     "--glibc-dir",
     type=click.Path(path_type=Path),
@@ -77,6 +90,15 @@ def cli(ctx, glibc_dir):
     """pwnlibc - CTF glibc manager and ELF patcher."""
     ctx.ensure_object(dict)
     ctx.obj["glibc_dir"] = glibc_dir
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@cli.command("help", hidden=True)
+@click.pass_context
+def help_cmd(ctx):
+    """Show help."""
+    click.echo(ctx.parent.get_help())
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +215,6 @@ def available(ctx, arch, mirror):
     table.add_column("Version", style="bold")
     table.add_column("Arch")
     table.add_column("Debug .deb", justify="center")
-    table.add_column("GNU source", justify="center")
     table.add_column("Installed", justify="center")
 
     entries: list[tuple[str, str, DebPackage]] = []
@@ -202,14 +223,13 @@ def available(ctx, arch, mirror):
         for a in sorted(by_version[ver].keys()):
             pkg = by_version[ver][a]
             has_dbg = "[green]yes[/green]" if pkg.dbg_filename else "[yellow]no[/yellow]"
-            src_avail = "[dim]?[/dim]"
 
             if (ver, a) in installed_ver_arch:
                 inst_str = "[green]yes[/green]"
             else:
                 inst_str = "[dim]-[/dim]"
 
-            table.add_row(str(idx), ver, a, has_dbg, src_avail, inst_str)
+            table.add_row(str(idx), ver, a, has_dbg, inst_str)
             entries.append((ver, a, pkg))
             idx += 1
 
@@ -231,28 +251,38 @@ def available(ctx, arch, mirror):
 @click.option(
     "-m", "--mode",
     type=click.Choice(["copy", "inplace"]),
-    default="copy",
-    help="copy: libs to binary dir. inplace: absolute paths to /glibc/.",
+    default="inplace",
+    help="inplace: absolute paths to /glibc/ (default). copy: libs to binary dir.",
 )
 @click.option("--variant", type=click.Choice(["deb", "built", "auto"]), default="auto",
               help="Which glibc variant to use.")
-@click.option("--no-backup", is_flag=True, help="Skip backup.")
 @click.option("--no-rpath", is_flag=True, help="Don't set RPATH.")
 @click.pass_context
-def patch(ctx, binary, glibc_version, arch, mode, variant, no_backup, no_rpath):
-    """Patch an ELF binary to use a specific glibc version."""
+def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
+    """Patch an ELF binary to use a specific glibc version.
+
+    Creates <binary>.patched — the original is never modified.
+    """
     binary = binary.resolve()
     glibc_dir = ctx.obj["glibc_dir"]
 
-    if arch is None:
-        try:
-            arch = detect_arch(binary)
-            console.print(f"Detected architecture: [bold]{arch}[/bold]")
-        except ValueError as e:
-            console.print(f"[red]{e}[/red]")
-            sys.exit(1)
+    try:
+        detected = detect_arch(binary)
+    except ValueError:
+        detected = None
 
-    # Try variants in order of preference
+    if arch is None:
+        if detected is None:
+            console.print("[red]Cannot detect binary architecture. Use -a/--arch.[/red]")
+            sys.exit(1)
+        arch = detected
+        console.print(f"Detected architecture: [bold]{arch}[/bold]")
+    elif detected and arch != detected:
+        console.print(
+            f"[red]Architecture mismatch: binary is {detected} but --arch {arch} was specified.[/red]"
+        )
+        sys.exit(1)
+
     glibc = None
     if variant == "auto":
         for v in ["deb", "built"]:
@@ -281,23 +311,19 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_backup, no_rpath):
             f"Try: pwnlibc download {glibc_version} --with-dbg  or  pwnlibc build {glibc_version} --arch {arch}[/yellow]"
         )
 
-    if not no_backup:
-        bak = create_backup(binary)
-        console.print(f"Backup: {bak}")
-
     try:
         if mode == "copy":
-            copied = patch_copy(binary, glibc, set_rpath=not no_rpath)
-            console.print(f"Copied {len(copied)} files to {binary.parent}")
+            patched, copied = patch_copy(binary, glibc, set_rpath=not no_rpath)
+            console.print(f"Copied {len(copied)} libs to {binary.parent}")
         else:
-            patch_inplace(binary, glibc, set_rpath=not no_rpath)
+            patched = patch_inplace(binary, glibc, set_rpath=not no_rpath)
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
 
     console.print(
-        f"[green]Patched [bold]{binary.name}[/bold] -> "
-        f"glibc {glibc_version} ({arch}, {mode} mode, {glibc.variant})[/green]"
+        f"[green]Created [bold]{patched.name}[/bold] -> "
+        f"glibc {glibc_version} ({arch}, {mode}, {glibc.variant})[/green]"
     )
 
 
@@ -308,14 +334,22 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_backup, no_rpath):
 @cli.command()
 @click.argument("binary", type=click.Path(exists=True, path_type=Path))
 def restore(binary):
-    """Restore a binary from backup."""
+    """Remove .patched file (and copied libs from copy-mode patching)."""
     binary = binary.resolve()
-    removed = restore_backup(binary)
-    if removed:
-        console.print(f"[green]Restored {binary.name} from {removed.name}[/green]")
+
+    from .patcher import PATCHED_SUFFIX
+    patched = binary.parent / (binary.name + PATCHED_SUFFIX)
+
+    if patched.exists():
+        patched.unlink()
+        console.print(f"[green]Removed {patched.name}[/green]")
     else:
-        console.print(f"[red]No backup found for {binary.name}[/red]")
-        sys.exit(1)
+        removed = restore_backup(binary)
+        if removed:
+            console.print(f"[green]Restored {binary.name} from {removed.name}[/green]")
+        else:
+            console.print(f"[red]No .patched file or backup found for {binary.name}[/red]")
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +366,7 @@ def restore(binary):
     help="auto: pick mirror per arch.",
 )
 @click.option("--with-dbg/--no-dbg", default=True, help="Include debug symbols.")
-@click.option("--source", is_flag=True, help="Also download GNU source.")
+@click.option("--source/--no-source", default=True, help="Download GNU source for GDB debugging.")
 @click.pass_context
 def download(ctx, versions, arch, mirror, with_dbg, source):
     """Download one or more glibc versions.
@@ -346,6 +380,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
       pwnlibc download 2.31 --arch arm64
     """
     glibc_dir = ctx.obj["glibc_dir"]
+    _check_writable(glibc_dir)
     archs_to_download = X86_ARCHES if arch == "all" else [arch]
 
     mirrors_to_try: set[str] = set()
@@ -427,10 +462,13 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
 def download_all(ctx, arch, mirror, with_dbg, check):
     """Download all available glibc versions for the given arch(es).
 
-    With --arch all, downloads amd64 + i686 (x86).
-    Specify --arch arm64 etc. to download all versions for that arch.
+    Skips versions already installed. With --arch all, downloads amd64 + i686
+    (x86). Specify --arch arm64 etc. to download all versions for that arch.
+    Use --check to see what would be downloaded without downloading.
     """
     glibc_dir = ctx.obj["glibc_dir"]
+    if not check:
+        _check_writable(glibc_dir)
     arches = X86_ARCHES if arch == "all" else [arch]
 
     mirrors_to_try: set[str] = set()
@@ -495,6 +533,7 @@ def build(ctx, versions, arch):
     from .builder import build_glibc, check_build_deps, check_source_available, get_install_cmd
 
     glibc_dir = ctx.obj["glibc_dir"]
+    _check_writable(glibc_dir)
 
     missing_deps = check_build_deps(arch)
     if missing_deps:
@@ -518,6 +557,8 @@ def build(ctx, versions, arch):
         if out_dir.is_dir():
             console.print(f"[yellow]{version}/{arch}-built already exists. Rebuilding...[/yellow]")
 
+        result_dir = None
+        build_err = None
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold]{task.fields[label]}"),
@@ -530,68 +571,13 @@ def build(ctx, versions, arch):
 
             try:
                 result_dir = build_glibc(version, arch, glibc_dir, progress_cb=cb)
-                console.print(f"  [green]{version}/{arch}-built installed at {result_dir}[/green]")
             except Exception as e:
-                console.print(f"  [red]{version}/{arch} build failed: {e}[/red]")
+                build_err = e
 
-
-# ---------------------------------------------------------------------------
-# update
-# ---------------------------------------------------------------------------
-
-@cli.command()
-@click.option("--check", is_flag=True, help="Dry run.")
-@click.option("--arch", type=click.Choice(ALL_ARCHES + ["all"]), default="all",
-              help="Which arches to update.")
-@click.option("--mirror", type=click.Choice(ALL_MIRRORS), default="auto")
-@click.pass_context
-def update(ctx, check, arch, mirror):
-    """Download missing glibc versions."""
-    glibc_dir = ctx.obj["glibc_dir"]
-    installs = discover_installed(glibc_dir)
-    installed_keys = {(i.version, i.arch) for i in installs}
-
-    arches = X86_ARCHES if arch == "all" else [arch]
-    mirrors_to_try: set[str] = set()
-    if mirror == "auto":
-        for a in arches:
-            mirrors_to_try.add(_mirror_for_arch(a))
-    else:
-        mirrors_to_try.add(mirror)
-
-    console.print("[bold]Checking mirrors...[/bold]")
-    all_packages = _scrape_mirrors(mirrors_to_try)
-
-    missing: dict[str, list[DebPackage]] = {}
-    for pkg in all_packages:
-        if pkg.arch in arches and (pkg.version, pkg.arch) not in installed_keys:
-            missing.setdefault(pkg.version, []).append(pkg)
-
-    if not missing:
-        console.print("[green]All available versions are installed.[/green]")
-        return
-
-    table = Table(title="Missing versions")
-    table.add_column("Version")
-    table.add_column("Architectures")
-    for ver in sorted(missing.keys(), key=lambda v: parse_version(v)):
-        archs_str = ", ".join(sorted(set(p.arch for p in missing[ver])))
-        table.add_row(ver, archs_str)
-    console.print(table)
-
-    if check:
-        console.print(f"[dim]{len(missing)} versions would be downloaded.[/dim]")
-        return
-
-    for ver in sorted(missing.keys(), key=lambda v: parse_version(v)):
-        best_for_ver = _pick_best(missing[ver])
-        for (_, pkg_arch), pkg in sorted(best_for_ver.items()):
-            dl_mirror = _mirror_for_arch(pkg_arch) if mirror == "auto" else mirror
-            try:
-                download_glibc(pkg, glibc_dir, mirror=dl_mirror)
-                console.print(f"  [green]{ver}/{pkg_arch} installed[/green]")
-            except Exception as e:
-                console.print(f"  [red]{ver}/{pkg_arch} failed: {e}[/red]")
+        if build_err:
+            console.print(f"  [red]{version}/{arch} build failed: {build_err}[/red]")
+        else:
+            console.print(f"  [green]{version}/{arch}-built installed at {result_dir}[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +591,8 @@ def update(ctx, check, arch, mirror):
 def verify(ctx, fix, mirror):
     """Verify installed glibc against official Ubuntu packages."""
     glibc_dir = ctx.obj["glibc_dir"]
+    if fix:
+        _check_writable(glibc_dir)
 
     installs = [i for i in discover_installed(glibc_dir) if i.variant == "deb"]
     if not installs:
@@ -700,6 +688,7 @@ def setup(ctx, archive_dir, target_dir):
     glibc_dir = ctx.obj["glibc_dir"]
     if target_dir is None:
         target_dir = glibc_dir
+    _check_writable(target_dir if target_dir.exists() else glibc_dir)
     if archive_dir is None:
         guess = Path.home() / "Desktop" / "infrastructure" / "pwn-env" / "debug_glibc"
         if guess.is_dir():

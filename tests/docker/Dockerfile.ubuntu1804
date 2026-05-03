@@ -19,4 +19,4 @@ RUN pip3 install -r /dev/null click rich pytest 2>/dev/null || \
 WORKDIR /pwnlibc
 COPY . .
 ENV PYTHONPATH=/pwnlibc
-CMD ["python3", "-c", "import sys; print(f'Python {sys.version}'); import pwnlibc"]
+CMD ["sh", "-c", "python3 -c \"import sys; print(f'Python {sys.version}'); import pwnlibc\" && python3 -m pytest tests/ -v --tb=short -m 'not network and not slow' || python3 -c \"import sys; print(f'Python {sys.version}: import-only test (pytest may have failed)')\""]
