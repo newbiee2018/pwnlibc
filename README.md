@@ -205,7 +205,9 @@ qemu-aarch64 ./arm_vuln
 qemu-aarch64 -L /glibc/2.35/arm64 ./arm_vuln
 ```
 
-**MIPS**: Not available from Ubuntu mirrors (Ubuntu dropped MIPS). Debian still ships mips/mipsel/mips64el glibc packages at `http://ftp.debian.org/debian/pool/main/g/glibc/`, but these require manual download and extraction — not currently automated by pwnlibc.
+**MIPS**: Not available from Ubuntu mirrors (Ubuntu dropped MIPS). Debian still ships mipsel/mips64el glibc packages (with `libc6-dbg`) at `http://ftp.debian.org/debian/pool/main/g/glibc/`. The current pool only has glibc 2.36 (Debian Bookworm). For older versions (2.19/Jessie, 2.24/Stretch, 2.28/Buster), use [snapshot.debian.org](https://snapshot.debian.org/). Debian MIPS packages are not automated by pwnlibc yet — manual download and extraction with `ar x` + `tar xf` works.
+
+**Debug symbols**: All architectures on Ubuntu ports have `libc6-dbg` packages available. riscv64 starts at glibc 2.31 (Ubuntu 20.04); all others go back to 2.23 (Ubuntu 16.04). For versions where no prebuilt debug package exists, cross-compile glibc from source with `gcc-<arch>-linux-gnu` and `-g3 -O1`.
 
 ## Glibc 2.34 naming change
 
