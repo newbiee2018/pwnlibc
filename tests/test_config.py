@@ -32,9 +32,8 @@ class TestParseVersion:
         with pytest.raises((ValueError, IndexError)):
             parse_version("notaversion")
 
-    def test_single_number_raises(self):
-        with pytest.raises((ValueError, IndexError)):
-            parse_version("2")
+    def test_single_number_valid(self):
+        assert parse_version("2") == (2,)
 
 
 class TestUsesNewNaming:

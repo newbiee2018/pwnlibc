@@ -358,6 +358,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
     console.print("[bold]Fetching package lists...[/bold]")
     all_packages = _scrape_mirrors(mirrors_to_try)
 
+    any_success = False
     for version in versions:
         matching = [
             p for p in all_packages
@@ -365,7 +366,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
         ]
 
         if not matching:
-            console.print(f"[yellow]{version}: not found. Try --mirror old-ubuntu[/yellow]")
+            console.print(f"[red]{version}: not found on mirrors. Try --mirror old-ubuntu[/red]")
             continue
 
         best = _pick_best(matching)
@@ -394,6 +395,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                     console.print(f"[red]Failed {pkg.filename}: {e}[/red]")
                     continue
 
+                any_success = True
                 console.print(f"  [green]{version}/{pkg_arch} installed[/green]")
 
         if source:
@@ -402,6 +404,9 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                 download_source(version, glibc_dir)
             except Exception as e:
                 console.print(f"[yellow]Source download failed: {e}[/yellow]")
+
+    if not any_success:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

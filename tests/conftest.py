@@ -57,7 +57,53 @@ def populated_glibc_dir(tmp_path):
     # Source dir for 2.35
     (glibc_dir / "2.35" / "source").mkdir(parents=True)
 
+    # Built variant: 2.31 amd64-built
+    built_dir = glibc_dir / "2.31" / "amd64-built" / "lib"
+    built_dir.mkdir(parents=True)
+    (built_dir / "libc-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 100)
+    (built_dir / "ld-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 100)
+    (built_dir / "libc.so.6").symlink_to("libc-2.31.so")
+    (built_dir / "ld-linux-x86-64.so.2").symlink_to("ld-2.31.so")
+
+    # arm64 deb install: 2.35
+    arm64_dir = glibc_dir / "2.35" / "arm64" / "lib"
+    arm64_dir.mkdir(parents=True)
+    (arm64_dir / "libc.so.6").write_bytes(b"\x7fELF" + b"\x00" * 100)
+    (arm64_dir / "ld-linux-aarch64.so.1").write_bytes(b"\x7fELF" + b"\x00" * 100)
+
     return glibc_dir
+
+
+SAMPLE_PORTS_MIRROR_HTML = """
+<html><body>
+<a href="libc6_2.23-0ubuntu11.3_arm64.deb">libc6_2.23-0ubuntu11.3_arm64.deb</a>
+<a href="libc6-dbg_2.23-0ubuntu11.3_arm64.deb">libc6-dbg_2.23-0ubuntu11.3_arm64.deb</a>
+<a href="libc6_2.27-3ubuntu1.6_arm64.deb">libc6_2.27-3ubuntu1.6_arm64.deb</a>
+<a href="libc6-dbg_2.27-3ubuntu1.6_arm64.deb">libc6-dbg_2.27-3ubuntu1.6_arm64.deb</a>
+<a href="libc6_2.31-0ubuntu9.16_arm64.deb">libc6_2.31-0ubuntu9.16_arm64.deb</a>
+<a href="libc6_2.31-0ubuntu9.16_armhf.deb">libc6_2.31-0ubuntu9.16_armhf.deb</a>
+<a href="libc6_2.35-0ubuntu3.8_arm64.deb">libc6_2.35-0ubuntu3.8_arm64.deb</a>
+<a href="libc6-dbg_2.35-0ubuntu3.8_arm64.deb">libc6-dbg_2.35-0ubuntu3.8_arm64.deb</a>
+<a href="libc6_2.35-0ubuntu3.8_armhf.deb">libc6_2.35-0ubuntu3.8_armhf.deb</a>
+<a href="libc6_2.35-0ubuntu3.8_ppc64el.deb">libc6_2.35-0ubuntu3.8_ppc64el.deb</a>
+<a href="libc6_2.35-0ubuntu3.8_s390x.deb">libc6_2.35-0ubuntu3.8_s390x.deb</a>
+<a href="libc6_2.35-0ubuntu3.8_riscv64.deb">libc6_2.35-0ubuntu3.8_riscv64.deb</a>
+</body></html>
+"""
+
+SAMPLE_OLD_UBUNTU_MIRROR_HTML = """
+<html><body>
+<a href="libc6_2.3.6-0ubuntu20.6_amd64.deb">libc6_2.3.6-0ubuntu20.6_amd64.deb</a>
+<a href="libc6_2.3.6-0ubuntu20.6_i386.deb">libc6_2.3.6-0ubuntu20.6_i386.deb</a>
+<a href="libc6_2.3.6-0ubuntu20.6_powerpc.deb">libc6_2.3.6-0ubuntu20.6_powerpc.deb</a>
+<a href="libc6_2.19-0ubuntu6.15_amd64.deb">libc6_2.19-0ubuntu6.15_amd64.deb</a>
+<a href="libc6_2.19-0ubuntu6.15_i386.deb">libc6_2.19-0ubuntu6.15_i386.deb</a>
+<a href="libc6-dbg_2.19-0ubuntu6.15_amd64.deb">libc6-dbg_2.19-0ubuntu6.15_amd64.deb</a>
+<a href="libc6_2.21-0ubuntu4.3_amd64.deb">libc6_2.21-0ubuntu4.3_amd64.deb</a>
+<a href="libc6_2.23-0ubuntu11_amd64.deb">libc6_2.23-0ubuntu11_amd64.deb</a>
+<a href="libc6-dbg_2.23-0ubuntu11_amd64.deb">libc6-dbg_2.23-0ubuntu11_amd64.deb</a>
+</body></html>
+"""
 
 
 def _build_minimal_elf(path, arch="amd64", needed=None):

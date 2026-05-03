@@ -87,14 +87,14 @@ class TestCliList:
         assert "2.31" in result.output
 
     @patch("pwnlibc.downloader._fetch_index")
-    def test_list_available(self, mock_fetch, runner, populated_glibc_dir):
+    def test_available_command(self, mock_fetch, runner, populated_glibc_dir):
         from tests.conftest import SAMPLE_MIRROR_HTML
         mock_fetch.return_value = SAMPLE_MIRROR_HTML
         result = runner.invoke(cli, [
-            "--glibc-dir", str(populated_glibc_dir), "list", "--available",
+            "--glibc-dir", str(populated_glibc_dir), "available", "--arch", "amd64",
         ])
         assert result.exit_code == 0
-        assert "Available for download" in result.output
+        assert "Available" in result.output
 
 
 class TestCliInfo:

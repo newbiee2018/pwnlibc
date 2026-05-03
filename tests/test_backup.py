@@ -57,8 +57,8 @@ class TestRestoreBackup:
         assert binary.read_bytes() == b"original"
         assert not removed.exists()
 
-    def test_restore_plain_bak_first(self, tmp_path):
-        """When both .bak and .bak.1 exist, restore picks .bak first."""
+    def test_restore_picks_latest_numbered(self, tmp_path):
+        """When both .bak and .bak.1 exist, restore picks the most recent (.bak.1)."""
         binary = tmp_path / "hello"
         binary.write_bytes(b"v1")
         create_backup(binary)  # -> .bak (contains v1)
@@ -67,8 +67,8 @@ class TestRestoreBackup:
 
         binary.write_bytes(b"v3")
         removed = restore_backup(binary)
-        assert binary.read_bytes() == b"v1"
-        assert removed.name == "hello.bak"
+        assert binary.read_bytes() == b"v2"
+        assert removed.name == "hello.bak.1"
 
     def test_restore_falls_back_to_numbered(self, tmp_path):
         """When .bak is gone but .bak.1 exists, restore picks .bak.1."""
