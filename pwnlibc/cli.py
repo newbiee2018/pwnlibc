@@ -454,6 +454,182 @@ def remove(ctx, versions, arch, variant, keep_cache):
 
 
 # ---------------------------------------------------------------------------
+# source
+# ---------------------------------------------------------------------------
+
+@cli.group(cls=_HelpGroup, invoke_without_command=True)
+@click.option("--check", is_flag=True, help="Check availability on ftp.gnu.org.")
+@click.pass_context
+def source(ctx, check):
+    """Manage glibc source code for GDB debugging.
+
+    Without a subcommand, shows source status for all installed versions.
+    """
+    if ctx.invoked_subcommand is not None:
+        ctx.obj["source_check"] = check
+        return
+
+    glibc_dir = ctx.obj["glibc_dir"]
+    installs = discover_installed(glibc_dir)
+
+    versions: dict[str, bool] = {}
+    for inst in installs:
+        if inst.version not in versions:
+            versions[inst.version] = inst.has_source
+
+    seen_dirs = set()
+    for d in sorted(glibc_dir.iterdir()) if glibc_dir.is_dir() else []:
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        try:
+            parse_version(d.name)
+        except (ValueError, IndexError):
+            continue
+        if d.name not in versions:
+            has_src = (d / "source").is_dir()
+            versions[d.name] = has_src
+
+    if not versions:
+        console.print("[dim]No glibc versions found.[/dim]")
+        return
+
+    from .builder import check_source_available
+
+    table = Table(title="Glibc source status")
+    table.add_column("Version", style="bold")
+    table.add_column("Installed", justify="center")
+    table.add_column("Source", justify="center")
+    if check:
+        table.add_column("Available online", justify="center")
+
+    for ver in sorted(versions.keys(), key=lambda v: parse_version(v)):
+        has_src = versions[ver]
+        has_any_lib = any(
+            i for i in installs if i.version == ver
+        )
+        inst_str = "[green]yes[/green]" if has_any_lib else "[dim]-[/dim]"
+        src_str = "[green]yes[/green]" if has_src else "[dim]-[/dim]"
+
+        row = [ver, inst_str, src_str]
+        if check:
+            if has_src:
+                row.append("[green]yes[/green]")
+            else:
+                avail = check_source_available(ver)
+                row.append("[green]yes[/green]" if avail else "[yellow]no[/yellow]")
+        table.add_row(*row)
+
+    console.print(table)
+    if not check:
+        console.print("[dim]Use --check to verify availability on ftp.gnu.org[/dim]")
+
+
+@source.command("download")
+@click.argument("versions", nargs=-1, required=True)
+@click.pass_context
+def source_download(ctx, versions):
+    """Download glibc source from ftp.gnu.org.
+
+    Examples:
+
+      pwnlibc source download 2.31
+
+      pwnlibc source download 2.27 2.35
+    """
+    glibc_dir = ctx.obj["glibc_dir"]
+    _check_writable(glibc_dir)
+
+    from .builder import check_source_available
+
+    for version in versions:
+        source_dir = glibc_dir / version / "source"
+        if source_dir.is_dir() and any(source_dir.iterdir()):
+            console.print(f"[dim]{version}: source already exists[/dim]")
+            continue
+
+        console.print(f"Checking {version}...", end=" ")
+        if not check_source_available(version):
+            console.print("[yellow]not available on ftp.gnu.org[/yellow]")
+            continue
+        console.print("downloading...")
+
+        try:
+            download_source(version, glibc_dir)
+            console.print(f"  [green]{version} source installed at {source_dir}[/green]")
+        except Exception as e:
+            console.print(f"  [red]{version} failed: {e}[/red]")
+
+
+@source.command("remove")
+@click.argument("versions", nargs=-1, required=True)
+@click.pass_context
+def source_remove(ctx, versions):
+    """Remove downloaded source for specific versions.
+
+    Examples:
+
+      pwnlibc source remove 2.31
+
+      pwnlibc source remove 2.27 2.35
+    """
+    glibc_dir = ctx.obj["glibc_dir"]
+    _check_writable(glibc_dir)
+
+    for version in versions:
+        source_dir = glibc_dir / version / "source"
+        if not source_dir.is_dir():
+            console.print(f"[yellow]{version}: no source installed[/yellow]")
+            continue
+        shutil.rmtree(source_dir)
+        console.print(f"[green]Removed source for {version}[/green]")
+
+        ver_dir = glibc_dir / version
+        if ver_dir.is_dir() and not any(ver_dir.iterdir()):
+            ver_dir.rmdir()
+            console.print(f"  [dim]Removed empty {version}/ directory[/dim]")
+
+
+@source.command("check")
+@click.argument("versions", nargs=-1)
+@click.pass_context
+def source_check(ctx, versions):
+    """Check which versions have source available on ftp.gnu.org.
+
+    Without arguments, checks all installed versions.
+
+    Examples:
+
+      pwnlibc source check
+
+      pwnlibc source check 2.19 2.31 2.40
+    """
+    glibc_dir = ctx.obj["glibc_dir"]
+
+    from .builder import check_source_available
+
+    if not versions:
+        installs = discover_installed(glibc_dir)
+        versions = sorted({i.version for i in installs}, key=lambda v: parse_version(v))
+        if not versions:
+            console.print("[dim]No installed versions to check.[/dim]")
+            return
+
+    for ver in versions:
+        source_dir = glibc_dir / ver / "source"
+        local = source_dir.is_dir() and any(source_dir.iterdir())
+
+        console.print(f"  {ver}: ", end="")
+        if local:
+            console.print("[green]installed[/green]")
+        else:
+            avail = check_source_available(ver)
+            if avail:
+                console.print("[cyan]available[/cyan]")
+            else:
+                console.print("[yellow]not available[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # download
 # ---------------------------------------------------------------------------
 

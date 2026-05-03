@@ -200,6 +200,22 @@ pwnlibc verify --fix          # re-download mismatched/missing files
 
 Only verifies `deb` variant installs (not source-built ones). By default only shows problems (MISSING/MISMATCH); use `-v` to see all entries.
 
+### `pwnlibc source`
+
+Manage glibc source code for GDB debugging.
+
+```bash
+pwnlibc source                        # show source status for all versions
+pwnlibc source --check                # also check ftp.gnu.org availability
+pwnlibc source download 2.31          # download source
+pwnlibc source download 2.27 2.35     # download multiple
+pwnlibc source remove 2.31            # remove source
+pwnlibc source check                  # check availability for all installed
+pwnlibc source check 2.19 2.31 2.40   # check specific versions
+```
+
+Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains.
+
 ### `pwnlibc setup`
 
 Extract existing `.tar.gz` archives (from `debug_glibc/`) to the glibc directory.
