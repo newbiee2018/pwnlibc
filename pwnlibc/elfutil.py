@@ -24,6 +24,7 @@ _MACHINE_MAP = {
     (3, ELFCLASS32): "i686",
     (183, ELFCLASS64): "arm64",
     (40, ELFCLASS32): "armhf",
+    (20, ELFCLASS32): "powerpc",
     (21, ELFCLASS64): "ppc64el",
     (22, ELFCLASS64): "s390x",
     (243, ELFCLASS64): "riscv64",

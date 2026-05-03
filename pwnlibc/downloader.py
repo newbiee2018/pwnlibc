@@ -14,11 +14,12 @@ from .config import ARCH_INFO, MIRRORS
 
 _ALL_DEB_ARCHES = "|".join(info["deb_arch"] for info in ARCH_INFO.values())
 
+# Match versions like 2.31, 2.3.6, 2.3.2.ds1
 DEB_PATTERN = re.compile(
-    r'libc6_(?P<full>(?P<ver>2\.\d+)-[^"_]+_(?P<arch>' + _ALL_DEB_ARCHES + r'))\.deb'
+    r'libc6_(?P<full>(?P<ver>2\.\d+(?:\.\d+)?(?:\.ds1)?)-[^"_]+_(?P<arch>' + _ALL_DEB_ARCHES + r'))\.deb'
 )
 DBG_PATTERN = re.compile(
-    r'libc6-dbg_(?P<full>(?P<ver>2\.\d+)-[^"_]+_(?P<arch>' + _ALL_DEB_ARCHES + r'))\.deb'
+    r'libc6-dbg_(?P<full>(?P<ver>2\.\d+(?:\.\d+)?(?:\.ds1)?)-[^"_]+_(?P<arch>' + _ALL_DEB_ARCHES + r'))\.deb'
 )
 
 _DEB_TO_PWNLIBC = {info["deb_arch"]: name for name, info in ARCH_INFO.items()}

@@ -64,8 +64,33 @@ ARCH_INFO = {
         "deb_arch": "riscv64",
         "deb_lib_dir": "riscv64-linux-gnu",
         "mirror": "ports",
+        "cross_gcc": "gcc-riscv64-linux-gnu",
+        "cross_triplet": "riscv64-linux-gnu",
+    },
+    "powerpc": {
+        "elf_machine": 20,
+        "elf_class": 1,
+        "ld_soname": "ld.so.1",
+        "deb_arch": "powerpc",
+        "deb_lib_dir": "powerpc-linux-gnu",
+        "mirror": "old-ubuntu",
+        "cross_gcc": "gcc-powerpc-linux-gnu",
+        "cross_triplet": "powerpc-linux-gnu",
     },
 }
+
+# Back-fill cross-compiler info for arches that don't have it yet
+_CROSS_DEFAULTS = {
+    "amd64": ("gcc", "x86_64-linux-gnu"),
+    "i686": ("gcc", "i686-linux-gnu"),
+    "arm64": ("gcc-aarch64-linux-gnu", "aarch64-linux-gnu"),
+    "armhf": ("gcc-arm-linux-gnueabihf", "arm-linux-gnueabihf"),
+    "ppc64el": ("gcc-powerpc64le-linux-gnu", "powerpc64le-linux-gnu"),
+    "s390x": ("gcc-s390x-linux-gnu", "s390x-linux-gnu"),
+}
+for _arch, (_gcc, _triplet) in _CROSS_DEFAULTS.items():
+    ARCH_INFO[_arch].setdefault("cross_gcc", _gcc)
+    ARCH_INFO[_arch].setdefault("cross_triplet", _triplet)
 
 ALL_ARCHES = list(ARCH_INFO.keys())
 X86_ARCHES = ["amd64", "i686"]
@@ -79,10 +104,13 @@ MIRRORS = {
 
 GNU_SOURCE_URL = "https://ftp.gnu.org/gnu/glibc/glibc-{version}.tar.xz"
 
+BUILD_DEPS = ["make", "gawk", "bison", "python3"]
 
-def parse_version(version: str) -> tuple[int, int]:
-    parts = version.split(".")
-    return (int(parts[0]), int(parts[1]))
+
+def parse_version(version: str) -> tuple[int, ...]:
+    clean = version.replace(".ds1", "")
+    parts = clean.split(".")
+    return tuple(int(p) for p in parts)
 
 
 def uses_new_naming(version: str) -> bool:

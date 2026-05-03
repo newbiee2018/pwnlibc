@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import (
@@ -25,36 +25,52 @@ class GlibcInstall:
     has_source: bool
     has_debug: bool
     new_naming: bool
+    variant: str = "deb"  # "deb", "deb-dbg", "built"
 
 
-def resolve_lib_paths(version: str, arch: str, glibc_dir: Path) -> GlibcInstall:
-    base_dir = glibc_dir / version / arch
+def _find_libc(lib_dir: Path, version: str) -> Path | None:
+    for name in [get_libc_real_name(version), "libc.so.6"]:
+        p = lib_dir / name
+        if p.exists():
+            return p.resolve() if p.is_symlink() else p
+    return None
+
+
+def _find_ld(lib_dir: Path, version: str, arch: str) -> Path | None:
+    for name in [get_ld_real_name(version, arch), ARCH_INFO[arch]["ld_soname"]]:
+        p = lib_dir / name
+        if p.exists():
+            return p.resolve() if p.is_symlink() else p
+    return None
+
+
+def resolve_lib_paths(version: str, arch: str, glibc_dir: Path,
+                      variant: str = "deb") -> GlibcInstall:
+    if variant == "built":
+        base_dir = glibc_dir / version / f"{arch}-built"
+    else:
+        base_dir = glibc_dir / version / arch
+
     lib_dir = base_dir / "lib"
+
     if not lib_dir.is_dir():
-        raise FileNotFoundError(
-            f"Glibc {version} ({arch}) not found at {lib_dir}. "
-            f"Run: pwnlibc download {version}"
-        )
-
-    libc_name = get_libc_real_name(version)
-    ld_name = get_ld_real_name(version, arch)
-
-    libc_path = lib_dir / libc_name
-    ld_path = lib_dir / ld_name
-
-    if not libc_path.exists():
-        alt_libc = lib_dir / "libc.so.6"
-        if alt_libc.exists():
-            libc_path = alt_libc.resolve()
+        # built variants may nest under usr/lib or the prefix structure
+        alt = base_dir / "usr" / "lib"
+        if alt.is_dir():
+            lib_dir = alt
         else:
-            raise FileNotFoundError(f"libc not found: tried {libc_path} and {alt_libc}")
+            raise FileNotFoundError(
+                f"Glibc {version} ({arch}, {variant}) not found at {lib_dir}. "
+                f"Run: pwnlibc download {version}"
+            )
 
-    if not ld_path.exists():
-        alt_ld = lib_dir / ARCH_INFO[arch]["ld_soname"]
-        if alt_ld.exists():
-            ld_path = alt_ld.resolve()
-        else:
-            raise FileNotFoundError(f"ld not found: tried {ld_path} and {alt_ld}")
+    libc_path = _find_libc(lib_dir, version)
+    if libc_path is None:
+        raise FileNotFoundError(f"libc not found in {lib_dir}")
+
+    ld_path = _find_ld(lib_dir, version, arch)
+    if ld_path is None:
+        raise FileNotFoundError(f"ld not found in {lib_dir}")
 
     source_dir = glibc_dir / version / "source"
     debug_dir = lib_dir / ".debug"
@@ -70,6 +86,7 @@ def resolve_lib_paths(version: str, arch: str, glibc_dir: Path) -> GlibcInstall:
         has_source=source_dir.is_dir(),
         has_debug=has_dbg,
         new_naming=uses_new_naming(version),
+        variant=variant,
     )
 
 
@@ -87,11 +104,21 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
             continue
 
         for arch in ALL_ARCHES:
+            # Standard deb install
             try:
-                install = resolve_lib_paths(version_dir.name, arch, glibc_dir)
+                install = resolve_lib_paths(version_dir.name, arch, glibc_dir, "deb")
                 installs.append(install)
             except FileNotFoundError:
-                continue
+                pass
+
+            # Source-built install
+            built_dir = version_dir / f"{arch}-built"
+            if built_dir.is_dir():
+                try:
+                    install = resolve_lib_paths(version_dir.name, arch, glibc_dir, "built")
+                    installs.append(install)
+                except FileNotFoundError:
+                    pass
 
     return installs
 
