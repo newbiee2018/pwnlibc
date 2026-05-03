@@ -111,6 +111,7 @@ def _extract_deb(deb_path: Path, out_dir: Path, arch: str):
         search_paths = [
             tmp / "lib" / deb_lib_dir,
             tmp / "usr" / "lib" / deb_lib_dir,
+            tmp / "lib64",
             tmp / "lib",
         ]
         src_lib = None
@@ -261,8 +262,8 @@ def verify_against_deb(
         installed_lib = glibc_dir / pkg.version / pkg.arch / "lib"
         results = []
 
-        key_files = ["libc.so.6", "ld-linux-x86-64.so.2", "ld-linux.so.2",
-                      "libpthread.so.0", "libm.so.6"]
+        ld_soname = ARCH_INFO.get(pkg.arch, {}).get("ld_soname", "ld-linux-x86-64.so.2")
+        key_files = ["libc.so.6", ld_soname, "libpthread.so.0", "libm.so.6"]
         for name in key_files:
             ref_file = ref_dir / name
             inst_file = installed_lib / name

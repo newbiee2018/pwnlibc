@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import (
+    ALL_ARCHES,
     ARCH_INFO,
     get_ld_real_name,
     get_libc_real_name,
@@ -85,7 +86,7 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
         except (ValueError, IndexError):
             continue
 
-        for arch in ("amd64", "i686"):
+        for arch in ALL_ARCHES:
             try:
                 install = resolve_lib_paths(version_dir.name, arch, glibc_dir)
                 installs.append(install)
