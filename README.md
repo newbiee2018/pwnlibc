@@ -174,16 +174,31 @@ Remove the `.patched` file created by `pwnlibc patch`. Also supports legacy `.ba
 pwnlibc restore ./vuln
 ```
 
+### `pwnlibc remove VERSION [VERSION ...]`
+
+Remove installed glibc versions.
+
+```bash
+pwnlibc remove 2.31                        # remove everything for 2.31
+pwnlibc remove 2.27 --arch amd64           # remove only amd64
+pwnlibc remove 2.31 --variant source       # remove only source
+pwnlibc remove 2.27 --variant built        # remove only source-built
+pwnlibc remove 2.31 --keep-cache           # keep cached .deb files
+```
+
+Cleans up empty version directories automatically. Cached `.deb` files are removed by default (use `--keep-cache` to keep them).
+
 ### `pwnlibc verify`
 
 Compare installed glibc files against official Ubuntu `.deb` packages (SHA256).
 
 ```bash
 pwnlibc verify                # check all deb-installed versions
+pwnlibc verify -v             # also show MATCH entries
 pwnlibc verify --fix          # re-download mismatched/missing files
 ```
 
-Only verifies `deb` variant installs (not source-built ones).
+Only verifies `deb` variant installs (not source-built ones). By default only shows problems (MISSING/MISMATCH); use `-v` to see all entries.
 
 ### `pwnlibc setup`
 

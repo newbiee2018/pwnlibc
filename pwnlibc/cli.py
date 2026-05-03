@@ -19,7 +19,6 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from .backup import restore_backup
 from .config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, DEFAULT_GLIBC_DIR, X86_ARCHES, parse_version, uses_new_naming
 from .downloader import (
     DebPackage,
@@ -35,6 +34,24 @@ from .patcher import patch_copy, patch_inplace
 console = Console()
 
 ALL_MIRRORS = ["ubuntu", "old-ubuntu", "tsinghua", "ports", "debian", "old-debian", "auto"]
+
+
+class _HelpCommand(click.Command):
+    def parse_args(self, ctx, args):
+        if args and args[0] == "help":
+            click.echo(self.get_help(ctx))
+            ctx.exit(0)
+        return super().parse_args(ctx, args)
+
+
+class _HelpGroup(click.Group):
+    command_class = _HelpCommand
+
+    def parse_args(self, ctx, args):
+        if args and args[0] == "help" and len(args) == 1:
+            click.echo(self.get_help(ctx))
+            ctx.exit(0)
+        return super().parse_args(ctx, args)
 
 
 def _check_writable(glibc_dir: Path) -> None:
@@ -77,7 +94,7 @@ def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
 # CLI group
 # ---------------------------------------------------------------------------
 
-@click.group(invoke_without_command=True)
+@click.group(cls=_HelpGroup, invoke_without_command=True)
 @click.option(
     "--glibc-dir",
     type=click.Path(path_type=Path),
@@ -92,13 +109,6 @@ def cli(ctx, glibc_dir):
     ctx.obj["glibc_dir"] = glibc_dir
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
-
-
-@cli.command("help", hidden=True)
-@click.pass_context
-def help_cmd(ctx):
-    """Show help."""
-    click.echo(ctx.parent.get_help())
 
 
 # ---------------------------------------------------------------------------
@@ -344,12 +354,91 @@ def restore(binary):
         patched.unlink()
         console.print(f"[green]Removed {patched.name}[/green]")
     else:
+        from .backup import restore_backup
         removed = restore_backup(binary)
         if removed:
             console.print(f"[green]Restored {binary.name} from {removed.name}[/green]")
         else:
             console.print(f"[red]No .patched file or backup found for {binary.name}[/red]")
             sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# remove
+# ---------------------------------------------------------------------------
+
+def _rmtree_verbose(path: Path, label: str) -> None:
+    shutil.rmtree(path)
+    console.print(f"  [green]Removed {label}[/green]")
+
+
+@cli.command()
+@click.argument("versions", nargs=-1, required=True)
+@click.option("--arch", type=click.Choice(ALL_ARCHES + ["all"]), default="all",
+              help="Remove only this architecture.")
+@click.option("--variant", type=click.Choice(["deb", "built", "source", "all"]), default="all",
+              help="Remove only this variant.")
+@click.option("--keep-cache", is_flag=True, help="Keep cached .deb files.")
+@click.pass_context
+def remove(ctx, versions, arch, variant, keep_cache):
+    """Remove installed glibc versions.
+
+    Examples:
+
+      pwnlibc remove 2.31
+
+      pwnlibc remove 2.27 --arch amd64
+
+      pwnlibc remove 2.31 --variant source
+
+      pwnlibc remove 2.27 --variant built --arch amd64
+    """
+    glibc_dir = ctx.obj["glibc_dir"]
+    _check_writable(glibc_dir)
+
+    for version in versions:
+        ver_dir = glibc_dir / version
+        if not ver_dir.is_dir():
+            console.print(f"[red]{version}: not installed[/red]")
+            continue
+
+        console.print(f"[bold]{version}:[/bold]")
+        removed_any = False
+
+        arches = ALL_ARCHES if arch == "all" else [arch]
+
+        for a in arches:
+            if variant in ("deb", "all"):
+                deb_dir = ver_dir / a
+                if deb_dir.is_dir():
+                    _rmtree_verbose(deb_dir, f"{a} (deb)")
+                    removed_any = True
+
+            if variant in ("built", "all"):
+                built_dir = ver_dir / f"{a}-built"
+                if built_dir.is_dir():
+                    _rmtree_verbose(built_dir, f"{a}-built")
+                    removed_any = True
+
+        if variant in ("source", "all"):
+            source_dir = ver_dir / "source"
+            if source_dir.is_dir():
+                _rmtree_verbose(source_dir, "source")
+                removed_any = True
+
+        if not keep_cache and variant in ("deb", "all"):
+            cache_dir = glibc_dir / ".cache"
+            if cache_dir.is_dir():
+                for deb_file in cache_dir.glob(f"libc6*_{version}-*"):
+                    deb_file.unlink()
+                    console.print(f"  [dim]Removed cache: {deb_file.name}[/dim]")
+
+        if ver_dir.is_dir() and not any(ver_dir.iterdir()):
+            ver_dir.rmdir()
+            console.print(f"  [dim]Removed empty {version}/ directory[/dim]")
+
+        if not removed_any:
+            console.print(f"  [yellow]Nothing to remove for given filters[/yellow]")
 
 
 # ---------------------------------------------------------------------------
@@ -586,9 +675,10 @@ def build(ctx, versions, arch):
 
 @cli.command()
 @click.option("--fix", is_flag=True, help="Re-download and replace mismatched files.")
+@click.option("--verbose", "-v", is_flag=True, help="Show MATCH entries too.")
 @click.option("--mirror", type=click.Choice(ALL_MIRRORS), default="auto")
 @click.pass_context
-def verify(ctx, fix, mirror):
+def verify(ctx, fix, verbose, mirror):
     """Verify installed glibc against official Ubuntu packages."""
     glibc_dir = ctx.obj["glibc_dir"]
     if fix:
@@ -618,12 +708,16 @@ def verify(ctx, fix, mirror):
     table.add_column("Details")
 
     versions_to_fix = []
+    match_count = 0
+    problem_count = 0
+    has_rows = False
 
     for inst in installs:
         key = (inst.version, inst.arch)
         pkg = pkg_map.get(key)
         if pkg is None:
             table.add_row(inst.version, inst.arch, "*", "[dim]no ref pkg[/dim]", "")
+            has_rows = True
             continue
 
         console.print(f"[dim]Verifying {inst.version}/{inst.arch}...[/dim]")
@@ -632,27 +726,39 @@ def verify(ctx, fix, mirror):
             results = verify_against_deb(pkg, glibc_dir, mirror=dl_mirror)
         except Exception as e:
             table.add_row(inst.version, inst.arch, "*", "[red]error[/red]", str(e))
+            has_rows = True
+            problem_count += 1
             continue
 
         needs_fix = False
         for fname, status, detail in results:
             if status == "MATCH":
-                style = "[green]MATCH[/green]"
-            elif status == "MISSING":
-                style = "[red]MISSING[/red]"
-                needs_fix = True
-            elif status == "MISMATCH":
-                style = "[yellow]MISMATCH[/yellow]"
-                needs_fix = True
+                match_count += 1
+                if verbose:
+                    table.add_row(inst.version, inst.arch, fname, "[green]MATCH[/green]", detail)
+                    has_rows = True
             else:
-                style = f"[red]{status}[/red]"
+                problem_count += 1
+                has_rows = True
+                if status == "MISSING":
+                    style = "[red]MISSING[/red]"
+                elif status == "MISMATCH":
+                    style = "[yellow]MISMATCH[/yellow]"
+                else:
+                    style = f"[red]{status}[/red]"
                 needs_fix = True
-            table.add_row(inst.version, inst.arch, fname, style, detail)
+                table.add_row(inst.version, inst.arch, fname, style, detail)
 
         if needs_fix:
             versions_to_fix.append((inst, pkg))
 
-    console.print(table)
+    if has_rows:
+        console.print(table)
+
+    if problem_count == 0:
+        console.print(f"[green]All {match_count} files verified OK.[/green]")
+    else:
+        console.print(f"\n[green]{match_count} OK[/green], [red]{problem_count} problems[/red]")
 
     if fix and versions_to_fix:
         console.print(f"\n[bold]Fixing {len(versions_to_fix)} installs...[/bold]")
