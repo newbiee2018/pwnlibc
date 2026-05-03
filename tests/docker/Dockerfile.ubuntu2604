@@ -1,0 +1,15 @@
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y python3 python3-pip patchelf binutils zstd gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /pwnlibc
+COPY requirements.txt .
+RUN pip3 install --break-system-packages -r requirements.txt 2>/dev/null || pip3 install -r requirements.txt
+RUN pip3 install --break-system-packages pytest 2>/dev/null || pip3 install pytest
+
+COPY . .
+ENV PYTHONPATH=/pwnlibc
+CMD ["python3", "-m", "pytest", "tests/", "-v", "--tb=short"]

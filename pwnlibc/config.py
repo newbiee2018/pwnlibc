@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from pathlib import Path
+import os
+
+DEFAULT_GLIBC_DIR = Path(os.environ.get("PWNLIBC_DIR", "/glibc"))
+BACKUP_SUFFIX = ".bak"
+
+NEW_NAMING_MIN = (2, 34)
+
+ARCH_INFO = {
+    "amd64": {
+        "elf_machine": 62,
+        "elf_class": 2,
+        "ld_soname": "ld-linux-x86-64.so.2",
+        "deb_arch": "amd64",
+        "deb_lib_dir": "x86_64-linux-gnu",
+        "mirror": "ubuntu",
+    },
+    "i686": {
+        "elf_machine": 3,
+        "elf_class": 1,
+        "ld_soname": "ld-linux.so.2",
+        "deb_arch": "i386",
+        "deb_lib_dir": "i386-linux-gnu",
+        "mirror": "ubuntu",
+    },
+    "arm64": {
+        "elf_machine": 183,
+        "elf_class": 2,
+        "ld_soname": "ld-linux-aarch64.so.1",
+        "deb_arch": "arm64",
+        "deb_lib_dir": "aarch64-linux-gnu",
+        "mirror": "ports",
+    },
+    "armhf": {
+        "elf_machine": 40,
+        "elf_class": 1,
+        "ld_soname": "ld-linux-armhf.so.3",
+        "deb_arch": "armhf",
+        "deb_lib_dir": "arm-linux-gnueabihf",
+        "mirror": "ports",
+    },
+    "ppc64el": {
+        "elf_machine": 21,
+        "elf_class": 2,
+        "ld_soname": "ld64.so.2",
+        "deb_arch": "ppc64el",
+        "deb_lib_dir": "powerpc64le-linux-gnu",
+        "mirror": "ports",
+    },
+    "s390x": {
+        "elf_machine": 22,
+        "elf_class": 2,
+        "ld_soname": "ld64.so.1",
+        "deb_arch": "s390x",
+        "deb_lib_dir": "s390x-linux-gnu",
+        "mirror": "ports",
+    },
+    "riscv64": {
+        "elf_machine": 243,
+        "elf_class": 2,
+        "ld_soname": "ld-linux-riscv64-lp64d.so.1",
+        "deb_arch": "riscv64",
+        "deb_lib_dir": "riscv64-linux-gnu",
+        "mirror": "ports",
+    },
+}
+
+ALL_ARCHES = list(ARCH_INFO.keys())
+X86_ARCHES = ["amd64", "i686"]
+
+MIRRORS = {
+    "ubuntu": "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/",
+    "old-ubuntu": "http://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc/",
+    "tsinghua": "https://mirror.tuna.tsinghua.edu.cn/ubuntu/pool/main/g/glibc/",
+    "ports": "http://ports.ubuntu.com/pool/main/g/glibc/",
+}
+
+GNU_SOURCE_URL = "https://ftp.gnu.org/gnu/glibc/glibc-{version}.tar.xz"
+
+
+def parse_version(version: str) -> tuple[int, int]:
+    parts = version.split(".")
+    return (int(parts[0]), int(parts[1]))
+
+
+def uses_new_naming(version: str) -> bool:
+    return parse_version(version) >= NEW_NAMING_MIN
+
+
+def get_libc_real_name(version: str) -> str:
+    if uses_new_naming(version):
+        return "libc.so.6"
+    return f"libc-{version}.so"
+
+
+def get_ld_real_name(version: str, arch: str) -> str:
+    if uses_new_naming(version):
+        return ARCH_INFO[arch]["ld_soname"]
+    return f"ld-{version}.so"

@@ -1,0 +1,30 @@
+services:
+  ubuntu1804:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ubuntu1804
+    container_name: pwnlibc-test-1804
+
+  ubuntu2004:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ubuntu2004
+    container_name: pwnlibc-test-2004
+
+  ubuntu2204:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ubuntu2204
+    container_name: pwnlibc-test-2204
+
+  ubuntu2404:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ubuntu2404
+    container_name: pwnlibc-test-2404
+
+  ubuntu2604:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ubuntu2604
+    container_name: pwnlibc-test-2604
