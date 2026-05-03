@@ -126,6 +126,22 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
     return installs
 
 
+def get_debug_build_path(glibc: GlibcInstall) -> str | None:
+    import re
+    for path in [glibc.lib_dir / ".debug" / glibc.libc_path.name, glibc.libc_path]:
+        if not path.exists():
+            continue
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            m = re.search(rb"/build/glibc-[^/]+/glibc-" + glibc.version.encode(), data)
+            if m:
+                return m.group(0).decode("ascii")
+        except Exception:
+            continue
+    return None
+
+
 def find_library(glibc: GlibcInstall, soname: str) -> Path | None:
     direct = glibc.lib_dir / soname
     if direct.exists():

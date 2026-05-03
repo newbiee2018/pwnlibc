@@ -28,7 +28,7 @@ from .downloader import (
     verify_against_deb,
 )
 from .elfutil import detect_arch
-from .glibc import discover_installed, resolve_lib_paths
+from .glibc import discover_installed, get_debug_build_path, resolve_lib_paths
 from .patcher import patch_copy, patch_inplace
 
 console = Console()
@@ -334,6 +334,18 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
         f"glibc {glibc_version} ({arch}, {mode}, {glibc.variant})[/green]"
     )
 
+    source_dir = glibc_dir / glibc_version / "source"
+    if glibc.has_source:
+        build_path = get_debug_build_path(glibc)
+        source_subdir = next(source_dir.iterdir(), None) if source_dir.is_dir() else None
+        if build_path and source_subdir:
+            console.print(
+                f"\n[dim]GDB source mapping:[/dim]\n"
+                f"  [bold]set substitute-path {build_path} {source_subdir}[/bold]"
+            )
+    else:
+        console.print(f"[dim]No source for GDB. Run: pwnlibc source download {glibc_version}[/dim]")
+
 
 # ---------------------------------------------------------------------------
 # restore
@@ -606,6 +618,7 @@ def source_check(ctx, versions):
     glibc_dir = ctx.obj["glibc_dir"]
 
     from .builder import check_source_available
+    from .config import GNU_SOURCE_URL
 
     if not versions:
         installs = discover_installed(glibc_dir)
@@ -614,19 +627,22 @@ def source_check(ctx, versions):
             console.print("[dim]No installed versions to check.[/dim]")
             return
 
+    console.print(f"[dim]Source: {GNU_SOURCE_URL.format(version='<VERSION>')}[/dim]\n")
+
     for ver in versions:
         source_dir = glibc_dir / ver / "source"
         local = source_dir.is_dir() and any(source_dir.iterdir())
 
         console.print(f"  {ver}: ", end="")
         if local:
-            console.print("[green]installed[/green]")
+            console.print(f"[green]installed[/green] [dim]({source_dir})[/dim]")
         else:
             avail = check_source_available(ver)
+            url = GNU_SOURCE_URL.format(version=ver)
             if avail:
-                console.print("[cyan]available[/cyan]")
+                console.print(f"[cyan]available[/cyan] [dim]({url})[/dim]")
             else:
-                console.print("[yellow]not available[/yellow]")
+                console.print(f"[yellow]not available[/yellow] [dim]({url})[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -964,12 +980,7 @@ def verify(ctx, fix, verbose, mirror):
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option(
-    "--archive-dir",
-    type=click.Path(exists=True, path_type=Path),
-    default=None,
-    help="Directory with .tar.gz archives.",
-)
+@click.argument("archive_dir", type=click.Path(exists=True, path_type=Path))
 @click.option(
     "--target-dir",
     type=click.Path(path_type=Path),
@@ -978,18 +989,20 @@ def verify(ctx, fix, verbose, mirror):
 )
 @click.pass_context
 def setup(ctx, archive_dir, target_dir):
-    """Extract .tar.gz archives from debug_glibc to glibc dir."""
+    """Extract .tar.gz archives to glibc dir.
+
+    ARCHIVE_DIR is the directory containing .tar.gz glibc archives.
+
+    Examples:
+
+      pwnlibc setup ./debug_glibc
+
+      pwnlibc setup /path/to/archives --target-dir /opt/glibc
+    """
     glibc_dir = ctx.obj["glibc_dir"]
     if target_dir is None:
         target_dir = glibc_dir
     _check_writable(target_dir if target_dir.exists() else glibc_dir)
-    if archive_dir is None:
-        guess = Path.home() / "Desktop" / "infrastructure" / "pwn-env" / "debug_glibc"
-        if guess.is_dir():
-            archive_dir = guess
-        else:
-            console.print("[red]Specify --archive-dir (directory with .tar.gz files)[/red]")
-            sys.exit(1)
 
     archives = sorted(archive_dir.glob("*.tar.gz"))
     if not archives:

@@ -96,18 +96,20 @@ def patch_copy(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> tup
 
     _copy_debug_files(glibc, copied_files, target_dir)
 
+    # Order matters: rpath first, then replace-needed, interpreter last.
+    # Reversing this causes "Loadable section outside of ELF segments" in GDB.
+    if set_rpath:
+        _run_patchelf(["--set-rpath", ".", str(patched)])
+
     _run_patchelf([
         "--replace-needed", "libc.so.6", libc_copy, str(patched),
     ])
-    _run_patchelf(["--set-interpreter", f"./{ld_copy}", str(patched)])
-
     for soname, lib_path in extra:
         _run_patchelf([
             "--replace-needed", soname, lib_path.name, str(patched),
         ])
 
-    if set_rpath:
-        _run_patchelf(["--set-rpath", ".", str(patched)])
+    _run_patchelf(["--set-interpreter", f"./{ld_copy}", str(patched)])
 
     return patched, copied_files
 
@@ -116,10 +118,11 @@ def patch_inplace(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> 
     _check_patchelf()
     patched = _make_patched_copy(binary)
 
-    interp = str(glibc.ld_path.resolve())
-    _run_patchelf(["--set-interpreter", interp, str(patched)])
-
+    # rpath first, interpreter last — avoids patchelf segment corruption
     if set_rpath:
         _run_patchelf(["--set-rpath", str(glibc.lib_dir), str(patched)])
+
+    interp = str(glibc.ld_path.resolve())
+    _run_patchelf(["--set-interpreter", interp, str(patched)])
 
     return patched

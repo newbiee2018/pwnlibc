@@ -164,7 +164,7 @@ pwnlibc patch ./vuln -v 2.31 --variant built          # use source-built variant
 
 **Copy mode**: Copies `libc-<ver>.so`, `ld-<ver>.so`, debug symbols, and any other NEEDED libraries to the binary's directory. Patches the binary with relative paths. The binary must be run from its directory.
 
-Architecture is auto-detected from the ELF header.
+Architecture is auto-detected from the ELF header. When source is available, outputs the GDB `set substitute-path` command to map Ubuntu build paths to local source.
 
 ### `pwnlibc restore BINARY`
 
@@ -214,15 +214,15 @@ pwnlibc source check                  # check availability for all installed
 pwnlibc source check 2.19 2.31 2.40   # check specific versions
 ```
 
-Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains.
+Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Source URL: `https://ftp.gnu.org/gnu/glibc/glibc-<version>.tar.xz` (not available for pre-2.10 versions).
 
-### `pwnlibc setup`
+### `pwnlibc setup ARCHIVE_DIR`
 
-Extract existing `.tar.gz` archives (from `debug_glibc/`) to the glibc directory.
+Extract existing `.tar.gz` archives to the glibc directory.
 
 ```bash
-sudo pwnlibc setup
-sudo pwnlibc setup --archive-dir /path/to/debug_glibc
+pwnlibc setup ./debug_glibc
+pwnlibc setup /path/to/archives --target-dir /opt/glibc
 ```
 
 ### `pwnlibc info BINARY`
