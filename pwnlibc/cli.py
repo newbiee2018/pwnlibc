@@ -288,13 +288,18 @@ def available(ctx, arch, mirror, check_source):
     help="inplace: absolute paths to /glibc/ (default). copy: libs to binary dir.",
 )
 @click.option("--variant", type=click.Choice(["deb", "built", "auto"]), default="auto",
-              help="auto: prefer deb, fallback to built. Debug symbols are a property of the install, not a separate variant.")
+              help="auto: prefer deb with debug symbols, prompt if unavailable. "
+                   "deb/built: use that variant directly.")
 @click.option("--no-rpath", is_flag=True, help="Don't set RPATH.")
 @click.pass_context
 def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
     """Patch an ELF binary to use a specific glibc version.
 
     Creates <binary>.patched — the original is never modified.
+
+    In auto mode (default), prefers deb with debug symbols for source-level
+    debugging. If only a deb without debug is available, prompts to build
+    from source, use the deb without debug, or cancel.
     """
     binary = binary.resolve()
     glibc_dir = ctx.obj["glibc_dir"]
@@ -316,38 +321,135 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
         )
         sys.exit(1)
 
-    glibc = None
-    if variant == "auto":
-        for v in ["deb", "built"]:
-            try:
-                glibc = resolve_lib_paths(glibc_version, arch, glibc_dir, v)
-                break
-            except FileNotFoundError:
-                continue
-    else:
+    glibc = _resolve_variant(glibc_version, arch, glibc_dir, variant, mode, no_rpath)
+    if glibc is None:
+        sys.exit(1)
+
+    _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath)
+
+
+def _resolve_variant(glibc_version, arch, glibc_dir, variant, mode, no_rpath):
+    """Resolve which glibc variant to use. Returns GlibcInstall or None."""
+    if variant != "auto":
         try:
             glibc = resolve_lib_paths(glibc_version, arch, glibc_dir, variant)
         except FileNotFoundError:
-            pass
+            console.print(f"[red]Glibc {glibc_version} ({arch}, {variant}) not found.[/red]")
+            console.print(f"[dim]Run: pwnlibc download {glibc_version} --arch {arch}[/dim]")
+            return None
+        if not glibc.has_debug:
+            console.print(f"[yellow]Warning: no debug symbols ({variant} variant).[/yellow]")
+        return glibc
 
-    if glibc is None:
-        console.print(f"[red]Glibc {glibc_version} ({arch}) not found.[/red]")
-        console.print(f"[dim]Run: pwnlibc download {glibc_version} --arch {arch}[/dim]")
-        sys.exit(1)
+    # --- auto mode: prefer deb(dbg) > built(dbg) > prompt ---
+    deb = None
+    built = None
+    try:
+        deb = resolve_lib_paths(glibc_version, arch, glibc_dir, "deb")
+    except FileNotFoundError:
+        pass
+    try:
+        built = resolve_lib_paths(glibc_version, arch, glibc_dir, "built")
+    except FileNotFoundError:
+        pass
 
+    # 1) deb with debug — best case
+    if deb and deb.has_debug:
+        return deb
+
+    # 2) built with debug
+    if built and built.has_debug:
+        console.print(f"Using [bold]built[/bold] variant (deb has no debug symbols)")
+        return built
+
+    # 3) deb exists but no debug, no built with debug — prompt user
+    if deb:
+        return _prompt_no_debug(glibc_version, arch, glibc_dir, deb)
+
+    # 4) nothing installed at all
+    console.print(f"[red]Glibc {glibc_version} ({arch}) not found.[/red]")
+    console.print(f"[dim]Run: pwnlibc download {glibc_version} --arch {arch}[/dim]")
+    return None
+
+
+def _prompt_no_debug(glibc_version, arch, glibc_dir, deb_install):
+    """Deb exists but has no debug symbols. Prompt user for action."""
+    console.print(
+        f"[yellow]Glibc {glibc_version} ({arch}) deb installed but "
+        f"has no debug symbols.[/yellow]"
+    )
+    console.print()
+    console.print("  [bold]1)[/bold] Build from source with debug symbols "
+                  "[dim](recommended, enables source-level debugging)[/dim]")
+    console.print("  [bold]2)[/bold] Use deb without debug symbols "
+                  "[dim](no source debugging or symbol info)[/dim]")
+    console.print("  [bold]3)[/bold] Cancel")
+    console.print()
+
+    choice = click.prompt("Choose", type=click.IntRange(1, 3), default=1)
+
+    if choice == 3:
+        console.print("[dim]Cancelled.[/dim]")
+        return None
+
+    if choice == 2:
+        console.print("[yellow]Patching without debug symbols. "
+                      "Source-level debugging will not be available.[/yellow]")
+        return deb_install
+
+    # choice == 1: build from source
+    console.print(f"\n[bold]Building glibc {glibc_version} from source...[/bold]")
+    from .builder import build_glibc, check_build_deps, check_source_available, get_install_cmd
+    from rich.progress import SpinnerColumn, TextColumn
+
+    missing_deps = check_build_deps(arch)
+    if missing_deps:
+        console.print("[red]Missing build dependencies:[/red]")
+        for dep in missing_deps:
+            console.print(f"  [red]- {dep}[/red]")
+        console.print(f"\n[bold]Install with:[/bold] {get_install_cmd(arch)}")
+        console.print("[yellow]Falling back to deb without debug symbols.[/yellow]")
+        return deb_install
+
+    if not check_source_available(glibc_version):
+        console.print(f"[red]Source not available on ftp.gnu.org for {glibc_version}.[/red]")
+        console.print("[yellow]Falling back to deb without debug symbols.[/yellow]")
+        return deb_install
+
+    build_err = None
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.fields[label]}"),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("", label=f"building {glibc_version}/{arch}")
+
+        def cb(stage, downloaded, total, tid=task_id):
+            progress.update(tid, description=f"  {stage}")
+
+        try:
+            build_glibc(glibc_version, arch, glibc_dir, progress_cb=cb)
+        except Exception as e:
+            build_err = e
+
+    if build_err:
+        console.print(f"[red]Build failed: {build_err}[/red]")
+        console.print("[yellow]Falling back to deb without debug symbols.[/yellow]")
+        return deb_install
+
+    console.print(f"[green]Build complete.[/green]")
+    try:
+        return resolve_lib_paths(glibc_version, arch, glibc_dir, "built")
+    except FileNotFoundError:
+        console.print("[red]Built variant not found after build.[/red]")
+        console.print("[yellow]Falling back to deb without debug symbols.[/yellow]")
+        return deb_install
+
+
+def _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath):
+    """Perform the actual patchelf operation and print results."""
     if glibc.variant != "deb":
         console.print(f"Using [bold]{glibc.variant}[/bold] variant")
-
-    if not glibc.has_debug:
-        if glibc.variant == "deb":
-            console.print(
-                f"[yellow]Warning: no debug symbols. "
-                f"Re-download to add: pwnlibc download {glibc_version} --arch {arch}[/yellow]"
-            )
-        else:
-            console.print(
-                f"[yellow]Warning: no debug symbols (built variant).[/yellow]"
-            )
 
     try:
         if mode == "copy":
@@ -1084,6 +1186,19 @@ def verify(ctx, fix, verbose, mirror):
 # setup
 # ---------------------------------------------------------------------------
 
+def _is_source_built(path: Path) -> bool:
+    """Detect if an extracted glibc dir is source-built (not from a .deb)."""
+    for sub in path.iterdir():
+        if not sub.is_dir() or sub.name in ("source", ".debug"):
+            continue
+        lib_dir = sub / "lib"
+        if not lib_dir.is_dir():
+            continue
+        if any(lib_dir.glob("*.a")) or (sub / "libexec").is_dir():
+            return True
+    return False
+
+
 @cli.command()
 @click.argument("archive_dir", type=click.Path(exists=True, path_type=Path))
 @click.option(
@@ -1092,9 +1207,15 @@ def verify(ctx, fix, verbose, mirror):
     default=None,
     help="Where to extract (default: glibc-dir).",
 )
+@click.option("--variant", type=click.Choice(["auto", "deb", "built"]), default="auto",
+              help="auto: detect from archive contents. Source-built archives (.a files, libexec/) → built variant.")
 @click.pass_context
-def setup(ctx, archive_dir, target_dir):
+def setup(ctx, archive_dir, target_dir, variant):
     """Extract .tar.gz archives to glibc dir.
+
+    Archives containing .a static libraries or libexec/ directories are
+    detected as source-built and placed under <arch>-built/ (not <arch>/).
+    Override with --variant deb or --variant built.
 
     ARCHIVE_DIR is the directory containing .tar.gz glibc archives.
 
@@ -1117,16 +1238,61 @@ def setup(ctx, archive_dir, target_dir):
     target_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Extracting {len(archives)} archives to {target_dir}")
 
+    import tempfile
+
     for arc in archives:
         version = arc.stem.replace(".tar", "")
-        dest = target_dir / version
-        if dest.is_dir():
-            console.print(f"  [dim]{version} already exists, skipping[/dim]")
-            continue
-        console.print(f"  Extracting {arc.name}...")
-        with tarfile.open(arc, "r:gz") as tf:
-            tf.extractall(path=target_dir)
-        console.print(f"  [green]{version} done[/green]")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with tarfile.open(arc, "r:gz") as tf:
+                tf.extractall(path=tmp_path)
+
+            extracted = tmp_path / version
+            if not extracted.is_dir():
+                candidates = [d for d in tmp_path.iterdir() if d.is_dir()]
+                if len(candidates) == 1:
+                    extracted = candidates[0]
+                else:
+                    console.print(f"  [red]{arc.name}: unexpected archive layout[/red]")
+                    continue
+
+            detected_variant = variant
+            if variant == "auto":
+                detected_variant = "built" if _is_source_built(extracted) else "deb"
+
+            dest = target_dir / version
+            dest.mkdir(parents=True, exist_ok=True)
+
+            for sub in sorted(extracted.iterdir()):
+                if not sub.is_dir():
+                    continue
+
+                if sub.name == "source":
+                    final = dest / "source"
+                    if final.is_dir():
+                        console.print(f"  [dim]{version}/source already exists, skipping[/dim]")
+                        continue
+                    shutil.copytree(sub, final)
+                    continue
+
+                arch_name = sub.name
+                if detected_variant == "built":
+                    final_name = f"{arch_name}-built"
+                else:
+                    final_name = arch_name
+
+                final = dest / final_name
+                if final.is_dir():
+                    console.print(f"  [dim]{version}/{final_name} already exists, skipping[/dim]")
+                    continue
+
+                shutil.copytree(sub, final)
+
+            console.print(
+                f"  [green]{version} done[/green] "
+                f"[dim]({detected_variant} variant)[/dim]"
+            )
 
     console.print("[green]Setup complete.[/green]")
 

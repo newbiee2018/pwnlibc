@@ -277,8 +277,14 @@ def verify_against_deb(
             if not ref_file.exists():
                 continue
 
+            # For old glibc (≤2.33), key names are symlinks to versioned files.
+            # Resolve to compare the real binaries.
             if ref_file.is_symlink():
-                continue
+                target_name = ref_file.readlink()
+                ref_file = ref_dir / target_name
+                if not ref_file.exists():
+                    continue
+                inst_file = installed_lib / target_name
 
             if not inst_file.exists():
                 results.append((name, "MISSING", ""))

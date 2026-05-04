@@ -145,8 +145,8 @@ Creates a separate `<arch>-built` variant under `/glibc/<version>/`. This coexis
 Plus: `make`, `gawk`, `bison`, `python3`.
 
 **Two variants** of glibc can coexist per version/arch:
-- **deb**: Extracted from Ubuntu `libc6` package (prebuilt, optimized). Debug symbols from `libc6-dbg` are added to `.debug/` subdir — shown as `deb+dbg` in `pwnlibc list`.
-- **built**: Compiled from source with `-g3` (full debug info baked into the binary itself)
+- **deb**: Extracted from Ubuntu `libc6` package (prebuilt, optimized). Debug symbols from `libc6-dbg` are added to `.debug/` subdir — shown as `deb(dbg)` in `pwnlibc list`.
+- **built**: Compiled from source with `-g3` (full debug info baked into the binary itself) — shown as `built(dbg)` in `pwnlibc list`.
 
 Use `--no-dbg` with `pwnlibc download` to skip debug symbols. Re-run `pwnlibc download` without `--no-dbg` to add them later.
 
@@ -160,6 +160,18 @@ pwnlibc patch ./vuln -v 2.27 -m copy                 # copy mode
 pwnlibc patch ./vuln -v 2.27 -a i686                 # force 32-bit
 pwnlibc patch ./vuln -v 2.31 --variant built          # use source-built variant
 ```
+
+**Variant selection** (`--variant auto|deb|built`):
+- `auto` (default): prefers debug-enabled variants for source-level debugging. Resolution order:
+  1. deb with debug symbols (`deb(dbg)`) — best case
+  2. built with debug symbols (`built(dbg)`) — falls back automatically
+  3. deb without debug — prompts the user:
+     - `1)` Build from source with `-g3` debug symbols (recommended, default)
+     - `2)` Use deb without debug (no source-level debugging)
+     - `3)` Cancel
+  If build fails (missing deps, no source on ftp.gnu.org), automatically falls back to deb without debug.
+- `deb`: use the deb-extracted variant directly (no prompt).
+- `built`: use the source-built variant directly (no prompt).
 
 **Inplace mode** (default): Sets the ELF interpreter and RPATH to absolute paths pointing at `/glibc/<ver>/<arch>/lib/`. No files copied. The binary can be run from anywhere. GDB finds debug symbols automatically via `.debug/` in the glibc install.
 
@@ -219,10 +231,11 @@ Source is shared across architectures at `/glibc/<version>/source/`. Auto-downlo
 
 ### `pwnlibc setup ARCHIVE_DIR`
 
-Extract existing `.tar.gz` archives to the glibc directory.
+Extract existing `.tar.gz` archives to the glibc directory. Automatically detects whether archives contain source-built glibc (`.a` static libraries, `libexec/` directories) and places them in the correct variant directory (`<arch>-built/` for source-built, `<arch>/` for deb-style).
 
 ```bash
-pwnlibc setup ./debug_glibc
+pwnlibc setup ./debug_glibc                           # auto-detect variant
+pwnlibc setup ./debug_glibc --variant built            # force built variant
 pwnlibc setup /path/to/archives --target-dir /opt/glibc
 ```
 

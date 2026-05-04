@@ -10,7 +10,9 @@ RUN apt-get update && \
         gcc-arm-linux-gnueabihf \
         gcc-powerpc64le-linux-gnu \
         gcc-s390x-linux-gnu \
-        gcc-riscv64-linux-gnu && \
+        gcc-riscv64-linux-gnu \
+        gcc-mipsel-linux-gnu \
+        gcc-mips64el-linux-gnuabi64 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /pwnlibc

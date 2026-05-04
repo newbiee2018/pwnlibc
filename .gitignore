@@ -9,3 +9,5 @@ build/
 .venv/
 venv/
 .env
+.pytest_cache/
+glibc-2.31/
