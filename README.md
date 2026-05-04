@@ -144,10 +144,11 @@ Creates a separate `<arch>-built` variant under `/glibc/<version>/`. This coexis
 
 Plus: `make`, `gawk`, `bison`, `python3`.
 
-**Three variants of glibc** can coexist per version/arch:
-- **deb**: Extracted from Ubuntu `libc6` package (prebuilt, optimized)
-- **deb-dbg**: Debug symbols from `libc6-dbg` package (added to `deb` via `.debug/` dir)
+**Two variants** of glibc can coexist per version/arch:
+- **deb**: Extracted from Ubuntu `libc6` package (prebuilt, optimized). Debug symbols from `libc6-dbg` are added to `.debug/` subdir — shown as `deb+dbg` in `pwnlibc list`.
 - **built**: Compiled from source with `-g3` (full debug info baked into the binary itself)
+
+Use `--no-dbg` with `pwnlibc download` to skip debug symbols. Re-run `pwnlibc download` without `--no-dbg` to add them later.
 
 ### `pwnlibc patch BINARY`
 

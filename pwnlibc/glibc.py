@@ -25,7 +25,7 @@ class GlibcInstall:
     has_source: bool
     has_debug: bool
     new_naming: bool
-    variant: str = "deb"  # "deb", "deb-dbg", "built"
+    variant: str = "deb"  # "deb" or "built"
 
 
 def _find_libc(lib_dir: Path, version: str) -> Path | None:

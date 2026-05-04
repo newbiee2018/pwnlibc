@@ -137,7 +137,6 @@ def list_cmd(ctx, arch):
     table.add_column("Version", style="bold")
     for a in present_arches:
         table.add_column(a)
-    table.add_column("Debug", justify="center")
     table.add_column("Source", justify="center")
     table.add_column("Naming")
 
@@ -150,26 +149,19 @@ def list_cmd(ctx, arch):
             if not arch_installs:
                 row.append("[dim]-[/dim]")
             else:
-                variants = [i.variant for i in arch_installs]
-                labels = []
-                if "deb" in variants:
-                    labels.append("deb")
-                if "built" in variants:
-                    labels.append("built")
-                row.append("[green]" + "+".join(labels) + "[/green]")
+                parts = []
+                for inst in arch_installs:
+                    label = inst.variant
+                    if inst.has_debug:
+                        label += "+dbg"
+                    parts.append(label)
+                row.append("[green]" + " ".join(parts) + "[/green]")
                 if any_inst is None:
                     any_inst = arch_installs[0]
 
-        if any_inst and any_inst.has_debug:
-            debug_str = "[green]yes[/green]"
-        elif any_inst:
-            debug_str = "[yellow]no[/yellow]"
-        else:
-            debug_str = "[dim]-[/dim]"
-
         source_str = "[green]yes[/green]" if any_inst and any_inst.has_source else "[dim]-[/dim]"
         naming = "new (>=2.34)" if uses_new_naming(ver) else "old"
-        table.add_row(ver, *row, debug_str, source_str, naming)
+        table.add_row(ver, *row, source_str, naming)
 
     console.print(table)
 
@@ -779,26 +771,44 @@ def download_all(ctx, arch, mirror, with_dbg, check):
     best = _pick_best(filtered)
 
     installs = discover_installed(glibc_dir)
-    installed_keys = {(i.version, i.arch) for i in installs}
+    installed_map: dict[tuple[str, str], bool] = {}
+    for i in installs:
+        if i.variant == "deb":
+            installed_map[(i.version, i.arch)] = i.has_debug
 
-    to_download = {k: v for k, v in best.items() if k not in installed_keys}
+    to_download: dict[tuple[str, str], DebPackage] = {}
+    to_add_dbg: dict[tuple[str, str], DebPackage] = {}
+    for k, v in best.items():
+        if k not in installed_map:
+            to_download[k] = v
+        elif with_dbg and not installed_map[k]:
+            to_add_dbg[k] = v
 
-    if not to_download:
+    if not to_download and not to_add_dbg:
         console.print("[green]All versions already installed.[/green]")
         return
 
-    console.print(f"[bold]{len(to_download)} entries to download:[/bold]")
-    for (ver, a) in sorted(to_download.keys(), key=lambda k: (parse_version(k[0]), k[1])):
-        console.print(f"  {ver} / {a}")
+    if to_download:
+        console.print(f"[bold]{len(to_download)} new versions to download:[/bold]")
+        for (ver, a) in sorted(to_download.keys(), key=lambda k: (parse_version(k[0]), k[1])):
+            console.print(f"  {ver} / {a}")
+
+    if to_add_dbg:
+        console.print(f"[bold]{len(to_add_dbg)} versions missing debug symbols:[/bold]")
+        for (ver, a) in sorted(to_add_dbg.keys(), key=lambda k: (parse_version(k[0]), k[1])):
+            console.print(f"  {ver} / {a}")
 
     if check:
         return
 
-    for (ver, a), pkg in sorted(to_download.items(), key=lambda x: (parse_version(x[0][0]), x[0][1])):
+    for (ver, a), pkg in sorted({**to_download, **to_add_dbg}.items(),
+                                  key=lambda x: (parse_version(x[0][0]), x[0][1])):
         dl_mirror = _mirror_for_arch(a) if mirror == "auto" else mirror
+        is_dbg_only = (ver, a) in to_add_dbg
         try:
             download_glibc(pkg, glibc_dir, mirror=dl_mirror, include_dbg=with_dbg)
-            console.print(f"  [green]{ver}/{a} installed[/green]")
+            label = "debug added" if is_dbg_only else "installed"
+            console.print(f"  [green]{ver}/{a} {label}[/green]")
         except Exception as e:
             console.print(f"  [red]{ver}/{a} failed: {e}[/red]")
 
