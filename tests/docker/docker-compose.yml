@@ -1,10 +1,4 @@
 services:
-  ubuntu1804:
-    build:
-      context: ../..
-      dockerfile: tests/docker/Dockerfile.ubuntu1804
-    container_name: pwnlibc-test-1804
-
   ubuntu2004:
     build:
       context: ../..
@@ -28,3 +22,14 @@ services:
       context: ../..
       dockerfile: tests/docker/Dockerfile.ubuntu2604
     container_name: pwnlibc-test-2604
+
+  # Full E2E: run network+slow tests (qemu, GDB, real downloads)
+  e2e-2404:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ubuntu2404
+    container_name: pwnlibc-e2e-2404
+    command: >
+      python3 -m pytest tests/ -v --tb=short
+      -m "network or slow"
+      -k "e2e_qemu or gdb_debug or PatchAndRun"

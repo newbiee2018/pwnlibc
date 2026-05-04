@@ -19,7 +19,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from .config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, DEFAULT_GLIBC_DIR, X86_ARCHES, parse_version, uses_new_naming
+from .config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, DEFAULT_GLIBC_DIR, MIRRORS, X86_ARCHES, parse_version, uses_new_naming
 from .downloader import (
     DebPackage,
     download_glibc,
@@ -33,7 +33,7 @@ from .patcher import patch_copy, patch_inplace
 
 console = Console()
 
-ALL_MIRRORS = ["ubuntu", "old-ubuntu", "tsinghua", "ports", "debian", "old-debian", "auto"]
+ALL_MIRRORS = list(MIRRORS.keys()) + ["auto"]
 
 
 class _HelpCommand(click.Command):
@@ -66,8 +66,17 @@ def _check_writable(glibc_dir: Path) -> None:
         sys.exit(1)
 
 
-def _mirror_for_arch(arch: str) -> str:
-    return ARCH_INFO.get(arch, {}).get("mirror", "ubuntu")
+def _mirrors_for_arch(arch: str) -> list[str]:
+    primary = ARCH_INFO.get(arch, {}).get("mirror", "ubuntu")
+    mirrors = [primary]
+    if primary == "ubuntu":
+        mirrors.append("old-ubuntu")
+    elif primary == "ports":
+        mirrors.append("ubuntu")
+        mirrors.append("old-ubuntu")
+    elif primary == "debian":
+        mirrors.append("old-debian")
+    return mirrors
 
 
 def _scrape_mirrors(mirrors: set[str]) -> list[DebPackage]:
@@ -88,6 +97,13 @@ def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
         if existing is None or pkg.full_id > existing.full_id:
             best[key] = pkg
     return best
+
+
+def _variant_label(inst) -> str:
+    label = inst.variant
+    if inst.has_debug:
+        label += "(dbg)"
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -123,52 +139,36 @@ def list_cmd(ctx, arch):
     glibc_dir = ctx.obj["glibc_dir"]
     installs = discover_installed(glibc_dir)
 
-    versions: dict[str, dict[str, list]] = {}
-    for inst in installs:
-        if arch != "all" and inst.arch != arch:
-            continue
-        versions.setdefault(inst.version, {}).setdefault(inst.arch, []).append(inst)
+    if arch != "all":
+        installs = [i for i in installs if i.arch == arch]
 
-    present_arches = sorted({a for v in versions.values() for a in v})
-    if not present_arches:
-        present_arches = X86_ARCHES
-
-    table = Table(title="Installed glibc versions")
-    table.add_column("Version", style="bold")
-    for a in present_arches:
-        table.add_column(a)
-    table.add_column("Source", justify="center")
-    table.add_column("Naming")
-
-    for ver in sorted(versions.keys(), key=lambda v: parse_version(v)):
-        data = versions[ver]
-        row = []
-        any_inst = None
-        for a in present_arches:
-            arch_installs = data.get(a, [])
-            if not arch_installs:
-                row.append("[dim]-[/dim]")
-            else:
-                parts = []
-                for inst in arch_installs:
-                    label = inst.variant
-                    if inst.has_debug:
-                        label += "+dbg"
-                    parts.append(label)
-                row.append("[green]" + " ".join(parts) + "[/green]")
-                if any_inst is None:
-                    any_inst = arch_installs[0]
-
-        source_str = "[green]yes[/green]" if any_inst and any_inst.has_source else "[dim]-[/dim]"
-        naming = "new (>=2.34)" if uses_new_naming(ver) else "old"
-        table.add_row(ver, *row, source_str, naming)
-
-    console.print(table)
-
-    if not versions:
+    if not installs:
         console.print("[dim]No glibc versions found.[/dim]")
         console.print(f"[dim]Looking in: {glibc_dir}[/dim]")
         console.print("[dim]Use 'pwnlibc available' to see downloadable versions.[/dim]")
+        return
+
+    table = Table(title="Installed glibc versions")
+    table.add_column("#", style="dim")
+    table.add_column("Version", style="bold")
+    table.add_column("Arch")
+    table.add_column("Variant")
+    table.add_column("Source", justify="center")
+
+    groups: dict[tuple[str, str], list] = {}
+    for inst in installs:
+        groups.setdefault((inst.version, inst.arch), []).append(inst)
+
+    idx = 1
+    for (ver, a) in sorted(groups.keys(), key=lambda k: (parse_version(k[0]), k[1])):
+        arch_installs = groups[(ver, a)]
+        variants = " ".join(_variant_label(i) for i in arch_installs)
+        has_src = any(i.has_source for i in arch_installs)
+        src_str = "[green]yes[/green]" if has_src else "[dim]-[/dim]"
+        table.add_row(str(idx), ver, a, variants, src_str)
+        idx += 1
+
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------
@@ -191,20 +191,26 @@ def available(ctx, arch, mirror):
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
         for a in arches:
-            mirrors_to_try.add(_mirror_for_arch(a))
-        mirrors_to_try.add("old-ubuntu")
+            for m in _mirrors_for_arch(a):
+                mirrors_to_try.add(m)
     else:
         mirrors_to_try.add(mirror)
 
-    console.print("[bold]Fetching package lists...[/bold]")
+    console.print(f"[bold]Fetching package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim]")
     packages = _scrape_mirrors(mirrors_to_try)
     if not packages:
         console.print("[red]No packages found.[/red]")
         return
 
     installs = discover_installed(glibc_dir)
-    installed_keys = {(i.version, i.arch, i.variant) for i in installs}
-    installed_ver_arch = {(i.version, i.arch) for i in installs}
+    installed_map: dict[tuple[str, str], str] = {}
+    for i in installs:
+        key = (i.version, i.arch)
+        label = _variant_label(i)
+        if key in installed_map:
+            installed_map[key] += " " + label
+        else:
+            installed_map[key] = label
 
     best = _pick_best([p for p in packages if p.arch in arches])
 
@@ -216,28 +222,29 @@ def available(ctx, arch, mirror):
     table.add_column("#", style="dim")
     table.add_column("Version", style="bold")
     table.add_column("Arch")
-    table.add_column("Installed", justify="center")
+    table.add_column("Mirror", style="dim")
+    table.add_column("Installed")
 
     entries: list[tuple[str, str, DebPackage]] = []
     idx = 1
     for ver in sorted(by_version.keys(), key=lambda v: parse_version(v)):
         for a in sorted(by_version[ver].keys()):
             pkg = by_version[ver][a]
+            pkg_mirror = ARCH_INFO.get(a, {}).get("mirror", "ubuntu")
 
-            if (ver, a) in installed_ver_arch:
-                inst_str = "[green]yes[/green]"
+            key = (ver, a)
+            if key in installed_map:
+                inst_str = f"[green]{installed_map[key]}[/green]"
             else:
                 inst_str = "[dim]-[/dim]"
 
-            table.add_row(str(idx), ver, a, inst_str)
+            table.add_row(str(idx), ver, a, pkg_mirror, inst_str)
             entries.append((ver, a, pkg))
             idx += 1
 
     console.print(table)
-    console.print(f"\n[dim]Total: {len(entries)} entries. "
-                  f"Use 'pwnlibc download VERSION --arch ARCH' to download specific entries.[/dim]")
-    console.print(f"[dim]Use 'pwnlibc download-all --arch ARCH' to download all for one arch.[/dim]")
-    console.print(f"[dim]Use 'pwnlibc download-all' to download all for x86 (amd64+i686).[/dim]")
+    console.print(f"\n[dim]{len(entries)} entries. "
+                  f"'pwnlibc download VERSION --arch ARCH' to download.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -306,10 +313,15 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
         console.print(f"Using [bold]{glibc.variant}[/bold] variant")
 
     if not glibc.has_debug:
-        console.print(
-            f"[yellow]Warning: no debug symbols. "
-            f"Try: pwnlibc download {glibc_version} --with-dbg  or  pwnlibc build {glibc_version} --arch {arch}[/yellow]"
-        )
+        if glibc.variant == "deb":
+            console.print(
+                f"[yellow]Warning: no debug symbols. "
+                f"Try: pwnlibc download {glibc_version} --arch {arch}[/yellow]"
+            )
+        else:
+            console.print(
+                f"[yellow]Warning: no debug symbols.[/yellow]"
+            )
 
     try:
         if mode == "copy":
@@ -323,8 +335,11 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
 
     console.print(
         f"[green]Created [bold]{patched.name}[/bold] -> "
-        f"glibc {glibc_version} ({arch}, {mode}, {glibc.variant})[/green]"
+        f"glibc {glibc_version} ({arch}, {mode}, {_variant_label(glibc)})[/green]"
     )
+
+    if not glibc.has_debug:
+        return
 
     source_dir = glibc_dir / glibc_version / "source"
     if glibc.has_source:
@@ -336,7 +351,11 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
                 f"  [bold]set substitute-path {build_path} {source_subdir}[/bold]"
             )
     else:
-        console.print(f"[dim]No source for GDB. Run: pwnlibc source download {glibc_version}[/dim]")
+        from .builder import check_source_available
+        if check_source_available(glibc_version):
+            console.print(f"[dim]Source available. Run: pwnlibc source download {glibc_version}[/dim]")
+        else:
+            console.print(f"[dim]No source available for {glibc_version} on ftp.gnu.org[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -462,15 +481,15 @@ def remove(ctx, versions, arch, variant, keep_cache):
 # ---------------------------------------------------------------------------
 
 @cli.group(cls=_HelpGroup, invoke_without_command=True)
-@click.option("--check", is_flag=True, help="Check availability on ftp.gnu.org.")
 @click.pass_context
-def source(ctx, check):
+def source(ctx):
     """Manage glibc source code for GDB debugging.
 
-    Without a subcommand, shows source status for all installed versions.
+    Without a subcommand, shows downloaded source for installed versions.
+    Use 'source check' to verify local source, 'source available' to
+    check ftp.gnu.org.
     """
     if ctx.invoked_subcommand is not None:
-        ctx.obj["source_check"] = check
         return
 
     glibc_dir = ctx.obj["glibc_dir"]
@@ -481,7 +500,6 @@ def source(ctx, check):
         if inst.version not in versions:
             versions[inst.version] = inst.has_source
 
-    seen_dirs = set()
     for d in sorted(glibc_dir.iterdir()) if glibc_dir.is_dir() else []:
         if not d.is_dir() or d.name.startswith("."):
             continue
@@ -497,35 +515,22 @@ def source(ctx, check):
         console.print("[dim]No glibc versions found.[/dim]")
         return
 
-    from .builder import check_source_available
-
     table = Table(title="Glibc source status")
     table.add_column("Version", style="bold")
-    table.add_column("Installed", justify="center")
     table.add_column("Source", justify="center")
-    if check:
-        table.add_column("Available online", justify="center")
+    table.add_column("Path")
 
+    glibc_dir_path = glibc_dir
     for ver in sorted(versions.keys(), key=lambda v: parse_version(v)):
         has_src = versions[ver]
-        has_any_lib = any(
-            i for i in installs if i.version == ver
-        )
-        inst_str = "[green]yes[/green]" if has_any_lib else "[dim]-[/dim]"
-        src_str = "[green]yes[/green]" if has_src else "[dim]-[/dim]"
-
-        row = [ver, inst_str, src_str]
-        if check:
-            if has_src:
-                row.append("[green]yes[/green]")
-            else:
-                avail = check_source_available(ver)
-                row.append("[green]yes[/green]" if avail else "[yellow]no[/yellow]")
-        table.add_row(*row)
+        if has_src:
+            src_dir = glibc_dir_path / ver / "source"
+            table.add_row(ver, "[green]yes[/green]", f"[dim]{src_dir}[/dim]")
+        else:
+            table.add_row(ver, "[dim]-[/dim]", "")
 
     console.print(table)
-    if not check:
-        console.print("[dim]Use --check to verify availability on ftp.gnu.org[/dim]")
+    console.print("[dim]Use 'pwnlibc source check' to verify, 'pwnlibc source available' to check ftp.gnu.org[/dim]")
 
 
 @source.command("download")
@@ -594,18 +599,46 @@ def source_remove(ctx, versions):
 
 
 @source.command("check")
+@click.pass_context
+def source_check(ctx):
+    """Verify local source directories exist and have content."""
+    glibc_dir = ctx.obj["glibc_dir"]
+    installs = discover_installed(glibc_dir)
+
+    versions = sorted({i.version for i in installs}, key=lambda v: parse_version(v))
+    if not versions:
+        console.print("[dim]No installed versions.[/dim]")
+        return
+
+    ok = 0
+    missing = 0
+    for ver in versions:
+        source_dir = glibc_dir / ver / "source"
+        if source_dir.is_dir() and any(source_dir.iterdir()):
+            ok += 1
+            console.print(f"  {ver}: [green]OK[/green] [dim]({source_dir})[/dim]")
+        else:
+            missing += 1
+            console.print(f"  {ver}: [yellow]missing[/yellow]")
+
+    console.print(f"\n[green]{ok} OK[/green], [yellow]{missing} missing[/yellow]")
+    if missing:
+        console.print("[dim]Use 'pwnlibc source download VERSION' or 'pwnlibc source available' to check online[/dim]")
+
+
+@source.command("available")
 @click.argument("versions", nargs=-1)
 @click.pass_context
-def source_check(ctx, versions):
-    """Check which versions have source available on ftp.gnu.org.
+def source_available(ctx, versions):
+    """Check which versions have source on ftp.gnu.org.
 
     Without arguments, checks all installed versions.
 
     Examples:
 
-      pwnlibc source check
+      pwnlibc source available
 
-      pwnlibc source check 2.19 2.31 2.40
+      pwnlibc source available 2.19 2.31 2.40
     """
     glibc_dir = ctx.obj["glibc_dir"]
 
@@ -671,11 +704,12 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
         for a in archs_to_download:
-            mirrors_to_try.add(_mirror_for_arch(a))
+            for m in _mirrors_for_arch(a):
+                mirrors_to_try.add(m)
     else:
         mirrors_to_try.add(mirror)
 
-    console.print("[bold]Fetching package lists...[/bold]")
+    console.print(f"[bold]Fetching package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim]")
     all_packages = _scrape_mirrors(mirrors_to_try)
 
     any_success = False
@@ -686,7 +720,8 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
         ]
 
         if not matching:
-            console.print(f"[red]{version}: not found on mirrors. Try --mirror old-ubuntu[/red]")
+            tried = ", ".join(sorted(mirrors_to_try))
+            console.print(f"[red]{version} ({', '.join(archs_to_download)}): not found on mirrors ({tried})[/red]")
             continue
 
         best = _pick_best(matching)
@@ -704,7 +739,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                 def cb(downloaded, total, tid=task_id):
                     progress.update(tid, total=total, completed=downloaded)
 
-                dl_mirror = _mirror_for_arch(pkg_arch) if mirror == "auto" else mirror
+                dl_mirror = _mirrors_for_arch(pkg_arch)[0] if mirror == "auto" else mirror
                 try:
                     download_glibc(
                         pkg, glibc_dir, mirror=dl_mirror,
@@ -719,11 +754,17 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                 console.print(f"  [green]{version}/{pkg_arch} installed[/green]")
 
         if source:
-            console.print(f"[dim]Downloading source for {version}...[/dim]")
-            try:
-                download_source(version, glibc_dir)
-            except Exception as e:
-                console.print(f"[yellow]Source download failed: {e}[/yellow]")
+            from .builder import check_source_available
+            if check_source_available(version):
+                src_dir = glibc_dir / version / "source"
+                if not src_dir.is_dir() or not any(src_dir.iterdir()):
+                    console.print(f"[dim]Downloading source for {version}...[/dim]")
+                    try:
+                        download_source(version, glibc_dir)
+                    except Exception as e:
+                        console.print(f"[yellow]Source download failed: {e}[/yellow]")
+            else:
+                console.print(f"[dim]{version}: no source available on ftp.gnu.org[/dim]")
 
     if not any_success:
         sys.exit(1)
@@ -759,12 +800,12 @@ def download_all(ctx, arch, mirror, with_dbg, check):
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
         for a in arches:
-            mirrors_to_try.add(_mirror_for_arch(a))
-        mirrors_to_try.add("old-ubuntu")
+            for m in _mirrors_for_arch(a):
+                mirrors_to_try.add(m)
     else:
         mirrors_to_try.add(mirror)
 
-    console.print("[bold]Fetching all package lists...[/bold]")
+    console.print(f"[bold]Fetching all package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim]")
     all_packages = _scrape_mirrors(mirrors_to_try)
 
     filtered = [p for p in all_packages if p.arch in arches]
@@ -803,7 +844,7 @@ def download_all(ctx, arch, mirror, with_dbg, check):
 
     for (ver, a), pkg in sorted({**to_download, **to_add_dbg}.items(),
                                   key=lambda x: (parse_version(x[0][0]), x[0][1])):
-        dl_mirror = _mirror_for_arch(a) if mirror == "auto" else mirror
+        dl_mirror = _mirrors_for_arch(a)[0] if mirror == "auto" else mirror
         is_dbg_only = (ver, a) in to_add_dbg
         try:
             download_glibc(pkg, glibc_dir, mirror=dl_mirror, include_dbg=with_dbg)
@@ -906,7 +947,8 @@ def verify(ctx, fix, verbose, mirror):
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
         for inst in installs:
-            mirrors_to_try.add(_mirror_for_arch(inst.arch))
+            for m in _mirrors_for_arch(inst.arch):
+                mirrors_to_try.add(m)
     else:
         mirrors_to_try.add(mirror)
 
@@ -935,7 +977,7 @@ def verify(ctx, fix, verbose, mirror):
             continue
 
         console.print(f"[dim]Verifying {inst.version}/{inst.arch}...[/dim]")
-        dl_mirror = _mirror_for_arch(inst.arch) if mirror == "auto" else mirror
+        dl_mirror = _mirrors_for_arch(inst.arch)[0] if mirror == "auto" else mirror
         try:
             results = verify_against_deb(pkg, glibc_dir, mirror=dl_mirror)
         except Exception as e:
@@ -977,7 +1019,7 @@ def verify(ctx, fix, verbose, mirror):
     if fix and versions_to_fix:
         console.print(f"\n[bold]Fixing {len(versions_to_fix)} installs...[/bold]")
         for inst, pkg in versions_to_fix:
-            dl_mirror = _mirror_for_arch(inst.arch) if mirror == "auto" else mirror
+            dl_mirror = _mirrors_for_arch(inst.arch)[0] if mirror == "auto" else mirror
             try:
                 download_glibc(pkg, glibc_dir, mirror=dl_mirror)
                 console.print(f"  [green]{inst.version}/{inst.arch} replaced[/green]")

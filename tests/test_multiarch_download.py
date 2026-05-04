@@ -19,6 +19,7 @@ from pwnlibc.cli import cli
 from pwnlibc.config import ALL_ARCHES, ARCH_INFO, MIRRORS, X86_ARCHES
 from pwnlibc.downloader import DEB_PATTERN, DBG_PATTERN, DebPackage, scrape_available
 from tests.conftest import (
+    SAMPLE_DEBIAN_MIRROR_HTML,
     SAMPLE_MIRROR_HTML,
     SAMPLE_OLD_UBUNTU_MIRROR_HTML,
     SAMPLE_PORTS_MIRROR_HTML,
@@ -62,6 +63,16 @@ class TestMultiArchPatterns:
         m = DEB_PATTERN.search("libc6_2.19-0ubuntu6.15_powerpc.deb")
         assert m is not None
         assert m.group("arch") == "powerpc"
+
+    def test_deb_pattern_mipsel(self):
+        m = DEB_PATTERN.search("libc6_2.31-13+deb11u10_mipsel.deb")
+        assert m is not None
+        assert m.group("arch") == "mipsel"
+
+    def test_deb_pattern_mips64el(self):
+        m = DEB_PATTERN.search("libc6_2.36-9+deb12u9_mips64el.deb")
+        assert m is not None
+        assert m.group("arch") == "mips64el"
 
     def test_deb_pattern_old_version_format(self):
         """Pre-2.23 versions like 2.3.6 should be matched."""
@@ -109,6 +120,26 @@ class TestMirrorScrapeByArch:
         packages = scrape_available("ports")
         riscv_pkgs = [p for p in packages if p.arch == "riscv64"]
         assert len(riscv_pkgs) >= 1
+
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_debian_mirror_mipsel(self, mock_fetch):
+        mock_fetch.return_value = SAMPLE_DEBIAN_MIRROR_HTML
+        packages = scrape_available("debian")
+        mipsel_pkgs = [p for p in packages if p.arch == "mipsel"]
+        assert len(mipsel_pkgs) >= 2
+        versions = {p.version for p in mipsel_pkgs}
+        assert "2.31" in versions
+        assert "2.36" in versions
+
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_debian_mirror_mips64el(self, mock_fetch):
+        mock_fetch.return_value = SAMPLE_DEBIAN_MIRROR_HTML
+        packages = scrape_available("debian")
+        mips64_pkgs = [p for p in packages if p.arch == "mips64el"]
+        assert len(mips64_pkgs) >= 2
+        versions = {p.version for p in mips64_pkgs}
+        assert "2.31" in versions
+        assert "2.36" in versions
 
     @patch("pwnlibc.downloader._fetch_index")
     def test_old_ubuntu_powerpc(self, mock_fetch):
@@ -246,7 +277,7 @@ class TestDownloadAll:
             "download-all", "--arch", "amd64", "--check",
         ])
         assert result.exit_code == 0
-        assert "entries to download" in result.output
+        assert "to download" in result.output
 
     @patch("pwnlibc.downloader._fetch_index")
     def test_download_all_check_arm64(self, mock_fetch, runner, tmp_path):
@@ -260,7 +291,7 @@ class TestDownloadAll:
             "download-all", "--arch", "arm64", "--check", "--mirror", "ports",
         ])
         assert result.exit_code == 0
-        assert "entries to download" in result.output
+        assert "to download" in result.output
 
     @patch("pwnlibc.downloader._fetch_index")
     def test_download_all_skips_installed(self, mock_fetch, runner, populated_glibc_dir):
@@ -272,15 +303,20 @@ class TestDownloadAll:
         ])
         assert result.exit_code == 0
         # 2.31, 2.35, 2.39 are installed — only 2.27 should be missing
-        if "entries to download" in result.output:
+        if "to download" in result.output:
             assert "2.27" in result.output
             # Installed versions should NOT be listed
             # (they may appear in other contexts but not in "to download" list)
 
     @patch("pwnlibc.downloader._fetch_index")
     def test_download_all_all_installed(self, mock_fetch, runner, populated_glibc_dir):
-        """If all versions installed, show 'All versions already installed'."""
-        # Only feed versions that are already installed
+        """If all versions installed (with debug), show 'All versions already installed'."""
+        # Add .debug dirs so all installs have debug symbols
+        for ver_arch in [("2.31", "amd64"), ("2.31", "i686"), ("2.39", "amd64")]:
+            dbg = populated_glibc_dir / ver_arch[0] / ver_arch[1] / "lib" / ".debug"
+            dbg.mkdir(exist_ok=True)
+            (dbg / "libc.so.6").write_bytes(b"\x00" * 10)
+
         html = """
         <a href="libc6_2.31-0ubuntu9.16_amd64.deb">libc6_2.31-0ubuntu9.16_amd64.deb</a>
         <a href="libc6_2.35-0ubuntu3.8_amd64.deb">libc6_2.35-0ubuntu3.8_amd64.deb</a>
@@ -404,40 +440,54 @@ class TestAvailableCommand:
             "available", "--arch", "amd64", "--mirror", "ubuntu",
         ])
         assert result.exit_code == 0
-        # Installed versions should be marked
-        assert "yes" in result.output
+        # Installed versions should show variant labels
+        assert "deb" in result.output
 
 
 class TestMirrorAutoSelection:
     """Mirror auto-selection picks correct mirror per architecture."""
 
     def test_amd64_uses_ubuntu_mirror(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("amd64") == "ubuntu"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("amd64")[0] == "ubuntu"
 
     def test_i686_uses_ubuntu_mirror(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("i686") == "ubuntu"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("i686")[0] == "ubuntu"
 
     def test_arm64_uses_ports_mirror(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("arm64") == "ports"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("arm64")[0] == "ports"
 
     def test_armhf_uses_ports_mirror(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("armhf") == "ports"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("armhf")[0] == "ports"
 
     def test_ppc64el_uses_ports_mirror(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("ppc64el") == "ports"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("ppc64el")[0] == "ports"
 
     def test_powerpc_uses_old_ubuntu(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("powerpc") == "old-ubuntu"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("powerpc")[0] == "old-ubuntu"
 
     def test_riscv64_uses_ports_mirror(self):
-        from pwnlibc.cli import _mirror_for_arch
-        assert _mirror_for_arch("riscv64") == "ports"
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("riscv64")[0] == "ports"
+
+    def test_mipsel_uses_debian_mirror(self):
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("mipsel")[0] == "debian"
+
+    def test_mips64el_uses_debian_mirror(self):
+        from pwnlibc.cli import _mirrors_for_arch
+        assert _mirrors_for_arch("mips64el")[0] == "debian"
+
+    def test_mirrors_list_includes_fallbacks(self):
+        from pwnlibc.cli import _mirrors_for_arch
+        assert len(_mirrors_for_arch("arm64")) > 1
+        assert "old-ubuntu" in _mirrors_for_arch("arm64")
+        assert "old-ubuntu" in _mirrors_for_arch("amd64")
 
 
 class TestArchConfig:

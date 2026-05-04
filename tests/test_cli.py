@@ -64,6 +64,18 @@ class TestCliHelp:
         result = runner.invoke(cli, ["setup", "--help"])
         assert result.exit_code == 0
 
+    def test_remove_help(self, runner):
+        result = runner.invoke(cli, ["remove", "--help"])
+        assert result.exit_code == 0
+
+    def test_source_help(self, runner):
+        result = runner.invoke(cli, ["source", "--help"])
+        assert result.exit_code == 0
+
+    def test_source_download_help(self, runner):
+        result = runner.invoke(cli, ["source", "download", "--help"])
+        assert result.exit_code == 0
+
 
 class TestCliList:
     def test_list_empty(self, runner, tmp_path):
@@ -133,7 +145,7 @@ class TestCliRestore:
         binary.write_bytes(b"\x7fELF" + b"\x00" * 100)
         result = runner.invoke(cli, ["restore", str(binary)])
         assert result.exit_code != 0
-        assert "No backup found" in result.output
+        assert "No .patched file or backup found" in result.output
 
 
 class TestCliDownload:
@@ -160,7 +172,7 @@ class TestCliDownloadAll:
             "download-all", "--check",
         ])
         assert result.exit_code == 0
-        assert "entries to download" in result.output or "already installed" in result.output
+        assert "to download" in result.output or "already installed" in result.output
 
 
 class TestCliModuleEntry:

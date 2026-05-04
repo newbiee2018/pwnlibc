@@ -68,7 +68,7 @@ pwnlibc list                    # table of installed versions
 pwnlibc list --arch amd64       # filter by architecture
 ```
 
-The table shows per-architecture availability (including whether each is a `deb` install or source `built`), debug symbol status, source availability, and naming style.
+Each row shows version, architecture, variant (`deb`, `deb(dbg)`, `built`, `built(dbg)`), and source availability.
 
 ### `pwnlibc available`
 
@@ -82,7 +82,7 @@ pwnlibc available --arch powerpc           # just powerpc (from old-releases)
 pwnlibc available --mirror old-ubuntu      # only old-releases mirror
 ```
 
-Shows a numbered table with version, arch, debug .deb availability, and whether already installed.
+Shows a numbered table with version, arch, mirror, and installed variant. Mirrors are auto-selected per architecture.
 
 ### `pwnlibc download VERSION [VERSION ...]`
 
@@ -100,7 +100,7 @@ pwnlibc download 2.19 --arch powerpc --mirror old-ubuntu  # old powerpc
 
 Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs to `/glibc/<version>/<arch>/lib/`.
 
-Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Override with `--mirror`.
+Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`.
 
 ### `pwnlibc download-all`
 
@@ -207,12 +207,12 @@ Manage glibc source code for GDB debugging.
 
 ```bash
 pwnlibc source                        # show source status for all versions
-pwnlibc source --check                # also check ftp.gnu.org availability
+pwnlibc source check                  # verify local source dirs (OK/missing)
+pwnlibc source available              # check ftp.gnu.org for all installed
+pwnlibc source available 2.19 2.31    # check specific versions
 pwnlibc source download 2.31          # download source
 pwnlibc source download 2.27 2.35     # download multiple
 pwnlibc source remove 2.31            # remove source
-pwnlibc source check                  # check availability for all installed
-pwnlibc source check 2.19 2.31 2.40   # check specific versions
 ```
 
 Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Source URL: `https://ftp.gnu.org/gnu/glibc/glibc-<version>.tar.xz` (not available for pre-2.10 versions).

@@ -57,15 +57,20 @@ class TestPatchCopy:
     @needs_tools
     def test_copy_mode_creates_files(self, tmp_path, populated_glibc_dir):
         from pwnlibc.glibc import resolve_lib_paths
-        from pwnlibc.patcher import patch_copy
+        from pwnlibc.patcher import PATCHED_SUFFIX, patch_copy
 
         binary = build_test_binary(tmp_path / "workdir")
         if binary is None:
             pytest.skip("failed to compile test binary")
 
+        original_bytes = binary.read_bytes()
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
-        copied = patch_copy(binary, inst)
+        patched, copied = patch_copy(binary, inst)
 
+        assert patched.exists()
+        assert patched == binary.parent / (binary.name + PATCHED_SUFFIX)
+        # Original binary is never modified
+        assert binary.read_bytes() == original_bytes
         assert len(copied) >= 2
         assert (binary.parent / "libc-2.31.so").exists()
         assert (binary.parent / "ld-2.31.so").exists()
@@ -80,10 +85,10 @@ class TestPatchCopy:
             pytest.skip("failed to compile test binary")
 
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
-        patch_copy(binary, inst)
+        patched, _ = patch_copy(binary, inst)
 
         result = subprocess.run(
-            ["patchelf", "--print-interpreter", str(binary)],
+            ["patchelf", "--print-interpreter", str(patched)],
             capture_output=True, text=True,
         )
         assert "./ld-2.31.so" in result.stdout
@@ -98,10 +103,10 @@ class TestPatchCopy:
             pytest.skip("failed to compile test binary")
 
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
-        patch_copy(binary, inst)
+        patched, _ = patch_copy(binary, inst)
 
         result = subprocess.run(
-            ["patchelf", "--print-rpath", str(binary)],
+            ["patchelf", "--print-rpath", str(patched)],
             capture_output=True, text=True,
         )
         assert "." in result.stdout
@@ -116,10 +121,10 @@ class TestPatchCopy:
             pytest.skip("failed to compile test binary")
 
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
-        patch_copy(binary, inst, set_rpath=False)
+        patched, _ = patch_copy(binary, inst, set_rpath=False)
 
         result = subprocess.run(
-            ["patchelf", "--print-rpath", str(binary)],
+            ["patchelf", "--print-rpath", str(patched)],
             capture_output=True, text=True,
         )
         # RPATH should not be "." since we passed set_rpath=False
@@ -137,10 +142,10 @@ class TestPatchInplace:
             pytest.skip("failed to compile test binary")
 
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
-        patch_inplace(binary, inst)
+        patched = patch_inplace(binary, inst)
 
         result = subprocess.run(
-            ["patchelf", "--print-interpreter", str(binary)],
+            ["patchelf", "--print-interpreter", str(patched)],
             capture_output=True, text=True,
         )
         assert str(inst.ld_path) in result.stdout or "ld-2.31.so" in result.stdout
@@ -155,10 +160,10 @@ class TestPatchInplace:
             pytest.skip("failed to compile test binary")
 
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
-        patch_inplace(binary, inst)
+        patched = patch_inplace(binary, inst)
 
         result = subprocess.run(
-            ["patchelf", "--print-rpath", str(binary)],
+            ["patchelf", "--print-rpath", str(patched)],
             capture_output=True, text=True,
         )
         assert str(inst.lib_dir) in result.stdout
@@ -200,12 +205,12 @@ class TestPatchAndRun:
 
         download_glibc(pkg, glibc_dir, include_dbg=False)
         inst = resolve_lib_paths("2.35", "amd64", glibc_dir)
-        patch_copy(binary, inst)
+        patched, _ = patch_copy(binary, inst)
 
         # Copy mode uses ./ld-X.XX.so — must run from binary's directory
         result = subprocess.run(
-            [str(binary)], capture_output=True, text=True,
-            cwd=str(binary.parent),
+            [str(patched)], capture_output=True, text=True,
+            cwd=str(patched.parent),
         )
         assert result.returncode == 0
         assert "pwnlibc-test-ok" in result.stdout
@@ -238,10 +243,10 @@ class TestPatchAndRun:
 
         download_glibc(pkg, glibc_dir, include_dbg=False)
         inst = resolve_lib_paths("2.35", "amd64", glibc_dir)
-        patch_inplace(binary, inst)
+        patched = patch_inplace(binary, inst)
 
         result = subprocess.run(
-            [str(binary)], capture_output=True, text=True,
+            [str(patched)], capture_output=True, text=True,
         )
         assert result.returncode == 0
         assert "pwnlibc-test-ok" in result.stdout

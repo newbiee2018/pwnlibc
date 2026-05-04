@@ -91,6 +91,17 @@ SAMPLE_PORTS_MIRROR_HTML = """
 </body></html>
 """
 
+SAMPLE_DEBIAN_MIRROR_HTML = """
+<html><body>
+<a href="libc6_2.31-13+deb11u10_mipsel.deb">libc6_2.31-13+deb11u10_mipsel.deb</a>
+<a href="libc6-dbg_2.31-13+deb11u10_mipsel.deb">libc6-dbg_2.31-13+deb11u10_mipsel.deb</a>
+<a href="libc6_2.31-13+deb11u10_mips64el.deb">libc6_2.31-13+deb11u10_mips64el.deb</a>
+<a href="libc6_2.36-9+deb12u9_mipsel.deb">libc6_2.36-9+deb12u9_mipsel.deb</a>
+<a href="libc6_2.36-9+deb12u9_mips64el.deb">libc6_2.36-9+deb12u9_mips64el.deb</a>
+<a href="libc6-dbg_2.36-9+deb12u9_mips64el.deb">libc6-dbg_2.36-9+deb12u9_mips64el.deb</a>
+</body></html>
+"""
+
 SAMPLE_OLD_UBUNTU_MIRROR_HTML = """
 <html><body>
 <a href="libc6_2.3.6-0ubuntu20.6_amd64.deb">libc6_2.3.6-0ubuntu20.6_amd64.deb</a>
@@ -285,6 +296,33 @@ def build_test_binary(tmp_path, arch="amd64"):
     try:
         subprocess.run(
             [gcc] + flags + ["-o", str(out), str(c_src), "-static-libgcc"],
+            check=True, capture_output=True, text=True,
+        )
+        os.chmod(str(out), 0o755)
+        return out
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def build_cross_test_binary(tmp_path, arch):
+    """Cross-compile a minimal C binary for a given architecture.
+
+    Returns the path to the compiled binary, or None if compilation fails
+    (e.g. cross-compiler not installed).
+    """
+    from pwnlibc.config import ARCH_INFO
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    c_src = tmp_path / f"test_cross_{arch}.c"
+    c_src.write_text('#include <stdio.h>\nint main(){puts("pwnlibc-test-ok");return 0;}\n')
+    out = tmp_path / f"test_cross_{arch}"
+
+    cross_triplet = ARCH_INFO[arch]["cross_triplet"]
+    gcc = f"{cross_triplet}-gcc"
+
+    try:
+        subprocess.run(
+            [gcc, "-o", str(out), str(c_src), "-static"],
             check=True, capture_output=True, text=True,
         )
         os.chmod(str(out), 0o755)
