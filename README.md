@@ -10,6 +10,20 @@ CTF glibc manager and ELF patcher. Downloads prebuilt glibc from Ubuntu mirrors,
 - `zstd` (for Ubuntu 22.04+ `.deb` files: `sudo apt install zstd`)
 - For source builds: `make`, `gawk`, `bison`, cross-compiler (see `pwnlibc build`)
 
+## Clone
+
+This repo uses the `debug_glibc` submodule. Clone recursively:
+
+```bash
+git clone --recursive https://github.com/newbiee2018/pwnlibc.git
+```
+
+If you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
 ## Install
 
 ```bash

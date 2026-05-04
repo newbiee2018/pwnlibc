@@ -1,0 +1,3 @@
+[submodule "debug_glibc"]
+	path = debug_glibc
+	url = https://github.com/newbiee2018/debug_glibc.git
