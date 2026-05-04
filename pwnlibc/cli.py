@@ -182,8 +182,10 @@ def list_cmd(ctx, arch):
     type=click.Choice(ALL_MIRRORS),
     default="auto",
 )
+@click.option("--check-source/--no-check-source", default=True,
+              help="Check ftp.gnu.org for source availability.")
 @click.pass_context
-def available(ctx, arch, mirror):
+def available(ctx, arch, mirror, check_source):
     """List glibc versions available for download."""
     glibc_dir = ctx.obj["glibc_dir"]
 
@@ -218,11 +220,29 @@ def available(ctx, arch, mirror):
     for (ver, a), pkg in best.items():
         by_version.setdefault(ver, {})[a] = pkg
 
+    source_avail: dict[str, bool] = {}
+    if check_source:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from .builder import check_source_available
+
+        unique_versions = sorted(set(by_version.keys()), key=lambda v: parse_version(v))
+        console.print(f"[dim]Checking source availability ({len(unique_versions)} versions)...[/dim]")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(check_source_available, ver): ver for ver in unique_versions}
+            for future in as_completed(futures):
+                ver = futures[future]
+                source_avail[ver] = future.result() is not None
+
+    # Check if all packages have debug debs
+    all_have_dbg = all(pkg.dbg_filename for (_, _), pkg in best.items())
+
     table = Table(title="Available glibc packages")
     table.add_column("#", style="dim")
     table.add_column("Version", style="bold")
     table.add_column("Arch")
     table.add_column("Mirror", style="dim")
+    if check_source:
+        table.add_column("Source", justify="center")
     table.add_column("Installed")
 
     entries: list[tuple[str, str, DebPackage]] = []
@@ -238,13 +258,23 @@ def available(ctx, arch, mirror):
             else:
                 inst_str = "[dim]-[/dim]"
 
-            table.add_row(str(idx), ver, a, pkg_mirror, inst_str)
+            row = [str(idx), ver, a, pkg_mirror]
+            if check_source:
+                src = source_avail.get(ver)
+                row.append("[green]yes[/green]" if src else "[dim]-[/dim]")
+            row.append(inst_str)
+
+            table.add_row(*row)
             entries.append((ver, a, pkg))
             idx += 1
 
     console.print(table)
-    console.print(f"\n[dim]{len(entries)} entries. "
-                  f"'pwnlibc download VERSION --arch ARCH' to download.[/dim]")
+
+    notes = [f"{len(entries)} entries."]
+    if all_have_dbg:
+        notes.append("All packages have libc6-dbg available.")
+    notes.append("'pwnlibc download VERSION --arch ARCH' to download.")
+    console.print(f"\n[dim]{' '.join(notes)}[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +662,9 @@ def source_check(ctx):
 def source_available(ctx, versions):
     """Check which versions have source on ftp.gnu.org.
 
-    Without arguments, checks all installed versions.
+    Without arguments, scrapes all mirrors to discover every available
+    version and checks source for each. With arguments, checks only
+    the specified versions.
 
     Examples:
 
@@ -642,32 +674,61 @@ def source_available(ctx, versions):
     """
     glibc_dir = ctx.obj["glibc_dir"]
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from .builder import check_source_available
-    from .config import GNU_SOURCE_URL
+    from .config import GNU_SOURCE_BASE, gnu_source_version
 
     if not versions:
+        mirrors_to_try: set[str] = set()
+        for a in ALL_ARCHES:
+            for m in _mirrors_for_arch(a):
+                mirrors_to_try.add(m)
+
+        console.print(f"[dim]Fetching package lists... ({', '.join(sorted(mirrors_to_try))})[/dim]")
+        all_packages = _scrape_mirrors(mirrors_to_try)
         installs = discover_installed(glibc_dir)
-        versions = sorted({i.version for i in installs}, key=lambda v: parse_version(v))
+        all_versions = set(p.version for p in all_packages) | set(i.version for i in installs)
+        versions = sorted(all_versions, key=lambda v: parse_version(v))
         if not versions:
-            console.print("[dim]No installed versions to check.[/dim]")
+            console.print("[dim]No versions found.[/dim]")
             return
 
-    console.print(f"[dim]Source: {GNU_SOURCE_URL.format(version='<VERSION>')}[/dim]\n")
+    console.print(f"[dim]Source: {GNU_SOURCE_BASE}glibc-<VERSION>.tar.{{xz,gz,bz2}}[/dim]")
+    console.print(f"[dim]Checking {len(versions)} versions...[/dim]\n")
 
+    # Check non-local versions in parallel
+    to_check = []
+    local_map: dict[str, Path] = {}
     for ver in versions:
         source_dir = glibc_dir / ver / "source"
-        local = source_dir.is_dir() and any(source_dir.iterdir())
-
-        console.print(f"  {ver}: ", end="")
-        if local:
-            console.print(f"[green]installed[/green] [dim]({source_dir})[/dim]")
+        if source_dir.is_dir() and any(source_dir.iterdir()):
+            local_map[ver] = source_dir
         else:
-            avail = check_source_available(ver)
-            url = GNU_SOURCE_URL.format(version=ver)
-            if avail:
-                console.print(f"[cyan]available[/cyan] [dim]({url})[/dim]")
-            else:
-                console.print(f"[yellow]not available[/yellow] [dim]({url})[/dim]")
+            to_check.append(ver)
+
+    remote_map: dict[str, str | None] = {}
+    if to_check:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(check_source_available, ver): ver for ver in to_check}
+            for future in as_completed(futures):
+                ver = futures[future]
+                remote_map[ver] = future.result()
+
+    avail_count = 0
+    unavail_count = 0
+    for ver in versions:
+        src_ver = gnu_source_version(ver)
+        if ver in local_map:
+            avail_count += 1
+            console.print(f"  {ver}: [green]installed[/green] [dim]({local_map[ver]})[/dim]")
+        elif ver in remote_map and remote_map[ver]:
+            avail_count += 1
+            console.print(f"  {ver}: [cyan]available[/cyan] [dim]({remote_map[ver]})[/dim]")
+        else:
+            unavail_count += 1
+            console.print(f"  {ver}: [yellow]not available[/yellow] [dim]({GNU_SOURCE_BASE}glibc-{src_ver}.tar.*)[/dim]")
+
+    console.print(f"\n{avail_count} available, {unavail_count} not available")
 
 
 # ---------------------------------------------------------------------------
@@ -754,17 +815,13 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                 console.print(f"  [green]{version}/{pkg_arch} installed[/green]")
 
         if source:
-            from .builder import check_source_available
-            if check_source_available(version):
-                src_dir = glibc_dir / version / "source"
-                if not src_dir.is_dir() or not any(src_dir.iterdir()):
-                    console.print(f"[dim]Downloading source for {version}...[/dim]")
-                    try:
-                        download_source(version, glibc_dir)
-                    except Exception as e:
-                        console.print(f"[yellow]Source download failed: {e}[/yellow]")
-            else:
-                console.print(f"[dim]{version}: no source available on ftp.gnu.org[/dim]")
+            src_dir = glibc_dir / version / "source"
+            if not src_dir.is_dir() or not any(src_dir.iterdir()):
+                console.print(f"[dim]Downloading source for {version}...[/dim]")
+                try:
+                    download_source(version, glibc_dir)
+                except Exception as e:
+                    console.print(f"[yellow]Source: {e}[/yellow]")
 
     if not any_success:
         sys.exit(1)

@@ -23,7 +23,7 @@ from pwnlibc.builder import (
     check_source_available,
     get_install_cmd,
 )
-from pwnlibc.config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, GNU_SOURCE_URL
+from pwnlibc.config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, GNU_SOURCE_BASE, GNU_SOURCE_FORMATS, gnu_source_version
 
 
 class TestCheckBuildDeps:
@@ -177,15 +177,26 @@ class TestCheckSourceAvailable:
 
     @pytest.mark.network
     def test_known_version_available(self):
-        assert check_source_available("2.31") is True
+        url = check_source_available("2.31")
+        assert url is not None
+        assert "glibc-2.31" in url
 
     @pytest.mark.network
     def test_known_version_235_available(self):
-        assert check_source_available("2.35") is True
+        url = check_source_available("2.35")
+        assert url is not None
+        assert "glibc-2.35" in url
 
     @pytest.mark.network
     def test_nonexistent_version(self):
-        assert check_source_available("9.99") is False
+        assert check_source_available("9.99") is None
+
+    @pytest.mark.network
+    def test_ds1_version_maps_to_base(self):
+        url = check_source_available("2.3.6.ds1")
+        if url:
+            assert "glibc-2.3.6" in url
+            assert "ds1" not in url
 
     @patch("urllib.request.urlopen")
     def test_mocked_available(self, mock_urlopen):
@@ -193,12 +204,14 @@ class TestCheckSourceAvailable:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_resp
-        assert check_source_available("2.31") is True
+        url = check_source_available("2.31")
+        assert url is not None
+        assert "glibc-2.31" in url
 
     @patch("urllib.request.urlopen")
     def test_mocked_unavailable(self, mock_urlopen):
         mock_urlopen.side_effect = Exception("404 Not Found")
-        assert check_source_available("9.99") is False
+        assert check_source_available("9.99") is None
 
 
 def _make_build_run_side_effect(version):
@@ -501,14 +514,23 @@ class TestBuildOverwrite:
 
 
 class TestGNUSourceURL:
-    """GNU_SOURCE_URL formats correctly for all tested versions."""
+    """GNU source URL construction works correctly."""
 
     @pytest.mark.parametrize("version", ["2.19", "2.23", "2.27", "2.31", "2.35", "2.39"])
     def test_url_format(self, version):
-        url = GNU_SOURCE_URL.format(version=version)
-        assert version in url
-        assert url.startswith("https://ftp.gnu.org/gnu/glibc/")
-        assert url.endswith(".tar.xz")
+        for fmt in GNU_SOURCE_FORMATS:
+            url = GNU_SOURCE_BASE + fmt.format(version=version)
+            assert version in url
+            assert url.startswith("https://ftp.gnu.org/gnu/glibc/")
+
+    @pytest.mark.parametrize("version,expected", [
+        ("2.3.2.ds1", "2.3.2"),
+        ("2.3.6.ds1", "2.3.6"),
+        ("2.31", "2.31"),
+        ("2.35", "2.35"),
+    ])
+    def test_gnu_source_version_strips_ds1(self, version, expected):
+        assert gnu_source_version(version) == expected
 
 
 class TestLiveBuild:
@@ -521,13 +543,15 @@ class TestLiveBuild:
     @pytest.mark.parametrize("version", ["2.23", "2.27", "2.31", "2.35"])
     def test_source_exists_on_gnu(self, version):
         """Key versions should be available on ftp.gnu.org."""
-        assert check_source_available(version) is True
+        url = check_source_available(version)
+        assert url is not None
+        assert url.startswith("https://ftp.gnu.org/gnu/glibc/")
 
     @pytest.mark.network
     def test_old_version_219_available(self):
-        assert check_source_available("2.19") is True
+        assert check_source_available("2.19") is not None
 
     @pytest.mark.network
     def test_very_old_version_unavailable(self):
         """Versions before ~2.3 are typically not on the mirror."""
-        assert check_source_available("1.0") is False
+        assert check_source_available("1.0") is None

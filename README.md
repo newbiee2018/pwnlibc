@@ -82,7 +82,7 @@ pwnlibc available --arch powerpc           # just powerpc (from old-releases)
 pwnlibc available --mirror old-ubuntu      # only old-releases mirror
 ```
 
-Shows a numbered table with version, arch, mirror, and installed variant. Mirrors are auto-selected per architecture.
+Shows a numbered table with version, arch, mirror, GNU source availability, and installed variant. Source availability is checked against ftp.gnu.org (use `--no-check-source` to skip). All packages include a libc6-dbg deb for debug symbols.
 
 ### `pwnlibc download VERSION [VERSION ...]`
 
@@ -208,14 +208,14 @@ Manage glibc source code for GDB debugging.
 ```bash
 pwnlibc source                        # show source status for all versions
 pwnlibc source check                  # verify local source dirs (OK/missing)
-pwnlibc source available              # check ftp.gnu.org for all installed
+pwnlibc source available              # check ftp.gnu.org for ALL mirror versions
 pwnlibc source available 2.19 2.31    # check specific versions
 pwnlibc source download 2.31          # download source
 pwnlibc source download 2.27 2.35     # download multiple
 pwnlibc source remove 2.31            # remove source
 ```
 
-Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Source URL: `https://ftp.gnu.org/gnu/glibc/glibc-<version>.tar.xz` (not available for pre-2.10 versions).
+Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Tries `.tar.xz`, `.tar.gz`, `.tar.bz2` formats from `https://ftp.gnu.org/gnu/glibc/`. Debian `.ds1` versions (e.g. `2.3.2.ds1`) map to the base GNU source (e.g. `glibc-2.3.2`).
 
 ### `pwnlibc setup ARCHIVE_DIR`
 

@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .config import ARCH_INFO, BUILD_DEPS, GNU_SOURCE_URL
+from .config import ARCH_INFO, BUILD_DEPS, GNU_SOURCE_BASE, GNU_SOURCE_FORMATS, gnu_source_version
 
 
 def check_build_deps(arch: str) -> list[str]:
@@ -41,16 +41,23 @@ def get_install_cmd(arch: str) -> str:
     return "sudo apt install " + " ".join(pkgs)
 
 
-def check_source_available(version: str) -> bool:
+def check_source_available(version: str) -> str | None:
+    """Check ftp.gnu.org for source. Returns URL if found, None otherwise.
+
+    Tries .tar.xz, .tar.gz, .tar.bz2. Handles .ds1 versions (2.3.2.ds1 → 2.3.2).
+    """
     import urllib.request
-    url = GNU_SOURCE_URL.format(version=version)
-    try:
-        req = urllib.request.Request(url, method="HEAD",
-                                     headers={"User-Agent": "pwnlibc/0.1"})
-        with urllib.request.urlopen(req, timeout=10):
-            return True
-    except Exception:
-        return False
+    src_ver = gnu_source_version(version)
+    for fmt in GNU_SOURCE_FORMATS:
+        url = GNU_SOURCE_BASE + fmt.format(version=src_ver)
+        try:
+            req = urllib.request.Request(url, method="HEAD",
+                                         headers={"User-Agent": "pwnlibc/0.1"})
+            with urllib.request.urlopen(req, timeout=10):
+                return url
+        except Exception:
+            continue
+    return None
 
 
 def build_glibc(
@@ -69,11 +76,14 @@ def build_glibc(
         shutil.rmtree(out_prefix)
     out_prefix.mkdir(parents=True)
 
-    url = GNU_SOURCE_URL.format(version=version)
+    src_ver = gnu_source_version(version)
+    url = check_source_available(version)
+    if url is None:
+        raise RuntimeError(f"Source not found on ftp.gnu.org for glibc-{src_ver}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        tarball = tmp / f"glibc-{version}.tar.xz"
+        tarball = tmp / url.rsplit("/", 1)[-1]
 
         if progress_cb:
             progress_cb("downloading source", 0, 0)
@@ -96,7 +106,7 @@ def build_glibc(
         subprocess.run(["tar", "xf", str(tarball), "-C", str(tmp)],
                         check=True, capture_output=True)
 
-        src_dir = tmp / f"glibc-{version}"
+        src_dir = tmp / f"glibc-{src_ver}"
         if not src_dir.is_dir():
             candidates = [d for d in tmp.iterdir() if d.is_dir() and d.name.startswith("glibc")]
             if candidates:

@@ -212,14 +212,19 @@ def download_glibc(
 
 
 def download_source(version: str, glibc_dir: Path, progress_cb=None) -> Path:
-    from .config import GNU_SOURCE_URL
+    from .builder import check_source_available
+    from .config import gnu_source_version
 
-    url = GNU_SOURCE_URL.format(version=version)
+    url = check_source_available(version)
+    if url is None:
+        src_ver = gnu_source_version(version)
+        raise RuntimeError(f"Source not available on ftp.gnu.org for glibc-{src_ver}")
+
     source_dir = glibc_dir / version / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tarball = Path(tmpdir) / f"glibc-{version}.tar.xz"
+        tarball = Path(tmpdir) / url.rsplit("/", 1)[-1]
         _download_file(url, tarball, progress_cb)
         subprocess.run(
             ["tar", "xf", str(tarball), "-C", str(source_dir)],

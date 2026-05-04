@@ -124,7 +124,17 @@ MIRRORS = {
     "old-debian": "http://archive.debian.org/debian/pool/main/g/glibc/",
 }
 
-GNU_SOURCE_URL = "https://ftp.gnu.org/gnu/glibc/glibc-{version}.tar.xz"
+GNU_SOURCE_BASE = "https://ftp.gnu.org/gnu/glibc/"
+GNU_SOURCE_FORMATS = [
+    "glibc-{version}.tar.xz",
+    "glibc-{version}.tar.gz",
+    "glibc-{version}.tar.bz2",
+]
+
+
+def gnu_source_version(version: str) -> str:
+    """Strip .ds1 suffix — 2.3.2.ds1 uses glibc-2.3.2 source."""
+    return version.replace(".ds1", "")
 
 BUILD_DEPS = ["make", "gawk", "bison", "python3"]
 
