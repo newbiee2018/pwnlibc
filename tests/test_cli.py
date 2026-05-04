@@ -104,6 +104,7 @@ class TestCliList:
         mock_fetch.return_value = SAMPLE_MIRROR_HTML
         result = runner.invoke(cli, [
             "--glibc-dir", str(populated_glibc_dir), "available", "--arch", "amd64",
+            "--no-check-source",
         ])
         assert result.exit_code == 0
         assert "Available" in result.output

@@ -82,7 +82,7 @@ pwnlibc available --arch powerpc           # just powerpc (from old-releases)
 pwnlibc available --mirror old-ubuntu      # only old-releases mirror
 ```
 
-Shows a numbered table with version, arch, mirror, GNU source availability, and installed variant. Source availability is checked against ftp.gnu.org (use `--no-check-source` to skip). All packages include a libc6-dbg deb for debug symbols.
+Shows a numbered table with version, arch, mirror, debug .deb availability, GNU source availability, and installed variant. Source availability is checked against ftp.gnu.org (use `--no-check-source` to skip). The "Debug .deb" column shows whether the mirror has a matching `libc6-dbg` package. The "Installed" column shows what's locally installed — `deb(dbg)` means installed with debug symbols, `deb` means installed without.
 
 ### `pwnlibc download VERSION [VERSION ...]`
 

@@ -233,14 +233,12 @@ def available(ctx, arch, mirror, check_source):
                 ver = futures[future]
                 source_avail[ver] = future.result() is not None
 
-    # Check if all packages have debug debs
-    all_have_dbg = all(pkg.dbg_filename for (_, _), pkg in best.items())
-
     table = Table(title="Available glibc packages")
     table.add_column("#", style="dim")
     table.add_column("Version", style="bold")
     table.add_column("Arch")
     table.add_column("Mirror", style="dim")
+    table.add_column("Debug .deb", justify="center")
     if check_source:
         table.add_column("Source", justify="center")
     table.add_column("Installed")
@@ -258,7 +256,9 @@ def available(ctx, arch, mirror, check_source):
             else:
                 inst_str = "[dim]-[/dim]"
 
-            row = [str(idx), ver, a, pkg_mirror]
+            dbg_str = "[green]yes[/green]" if pkg.dbg_filename else "[dim]-[/dim]"
+
+            row = [str(idx), ver, a, pkg_mirror, dbg_str]
             if check_source:
                 src = source_avail.get(ver)
                 row.append("[green]yes[/green]" if src else "[dim]-[/dim]")
@@ -269,12 +269,8 @@ def available(ctx, arch, mirror, check_source):
             idx += 1
 
     console.print(table)
-
-    notes = [f"{len(entries)} entries."]
-    if all_have_dbg:
-        notes.append("All packages have libc6-dbg available.")
-    notes.append("'pwnlibc download VERSION --arch ARCH' to download.")
-    console.print(f"\n[dim]{' '.join(notes)}[/dim]")
+    console.print(f"\n[dim]{len(entries)} entries. "
+                  f"'pwnlibc download VERSION --arch ARCH' to download.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +288,7 @@ def available(ctx, arch, mirror, check_source):
     help="inplace: absolute paths to /glibc/ (default). copy: libs to binary dir.",
 )
 @click.option("--variant", type=click.Choice(["deb", "built", "auto"]), default="auto",
-              help="Which glibc variant to use.")
+              help="auto: prefer deb, fallback to built. Debug symbols are a property of the install, not a separate variant.")
 @click.option("--no-rpath", is_flag=True, help="Don't set RPATH.")
 @click.pass_context
 def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
@@ -346,11 +342,11 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
         if glibc.variant == "deb":
             console.print(
                 f"[yellow]Warning: no debug symbols. "
-                f"Try: pwnlibc download {glibc_version} --arch {arch}[/yellow]"
+                f"Re-download to add: pwnlibc download {glibc_version} --arch {arch}[/yellow]"
             )
         else:
             console.print(
-                f"[yellow]Warning: no debug symbols.[/yellow]"
+                f"[yellow]Warning: no debug symbols (built variant).[/yellow]"
             )
 
     try:

@@ -415,6 +415,7 @@ class TestAvailableCommand:
         result = runner.invoke(cli, [
             "--glibc-dir", str(glibc_dir),
             "available", "--arch", "amd64", "--mirror", "ubuntu",
+            "--no-check-source",
         ])
         assert result.exit_code == 0
         assert "2.31" in result.output
@@ -428,6 +429,7 @@ class TestAvailableCommand:
         result = runner.invoke(cli, [
             "--glibc-dir", str(glibc_dir),
             "available", "--arch", "arm64", "--mirror", "ports",
+            "--no-check-source",
         ])
         assert result.exit_code == 0
         assert "arm64" in result.output
@@ -438,10 +440,13 @@ class TestAvailableCommand:
         result = runner.invoke(cli, [
             "--glibc-dir", str(populated_glibc_dir),
             "available", "--arch", "amd64", "--mirror", "ubuntu",
+            "--no-check-source",
         ])
         assert result.exit_code == 0
         # Installed versions should show variant labels
         assert "deb" in result.output
+        # Debug .deb column should be present
+        assert "Debug .deb" in result.output
 
 
 class TestMirrorAutoSelection:
