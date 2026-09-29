@@ -248,6 +248,58 @@ def _build_minimal_elf(path, arch="amd64", needed=None):
     return path
 
 
+def _build_debuglink_elf(path, debuglink_name):
+    """Build a minimal 64-bit ELF whose .gnu_debuglink names debuglink_name.
+
+    Mirrors Ubuntu libc, where .gnu_debuglink holds the build-id-named
+    debug file (e.g. <hash>.debug) shipped separately in libc6-dbg.
+    """
+    ehdr_size = 64
+    shent_size = 64
+
+    # .gnu_debuglink contents: NUL-terminated filename + 4-byte CRC (zero
+    # placeholder here; only the string is meaningful to our parser)
+    debuglink_data = debuglink_name.encode("ascii") + b"\x00"
+    debuglink_data += b"\x00" * (4 - len(debuglink_data) % 4 or 4)
+
+    shstrtab_data = b"\x00.gnu_debuglink\x00.shstrtab\x00"
+    debuglink_name_off = 1
+    shstrtab_name_off = 1 + len(b".gnu_debuglink\x00")
+
+    debuglink_offset = ehdr_size
+    shstrtab_offset = debuglink_offset + len(debuglink_data)
+    sh_offset = shstrtab_offset + len(shstrtab_data)
+    if sh_offset % 8 != 0:
+        shstrtab_data += b"\x00" * (8 - sh_offset % 8)
+        sh_offset = shstrtab_offset + len(shstrtab_data)
+
+    ident = b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+    ehdr = ident
+    ehdr += struct.pack("<HHI", 2, 62, 1)
+    ehdr += struct.pack("<QQQ", 0, 0, sh_offset)
+    ehdr += struct.pack("<IHHHHHH", 0, ehdr_size, 0, 0, shent_size, 3, 2)
+
+    # Elf64_Shdr = IIQQQQIIQQ (64 bytes)
+    null_sh = struct.pack("<IIQQQQIIQQ", *([0] * 10))
+    debuglink_sh = struct.pack(
+        "<IIQQQQIIQQ",
+        debuglink_name_off, 1, 0, 0,
+        debuglink_offset, len(debuglink_data),
+        0, 0, 1, 0,
+    )
+    shstrtab_sh = struct.pack(
+        "<IIQQQQIIQQ",
+        shstrtab_name_off, 3, 0, 0,
+        shstrtab_offset, len(shstrtab_data),
+        0, 0, 1, 0,
+    )
+
+    path.write_bytes(
+        ehdr + debuglink_data + shstrtab_data + null_sh + debuglink_sh + shstrtab_sh
+    )
+    return path
+
+
 @pytest.fixture
 def minimal_elf_amd64(tmp_path):
     """A synthetic amd64 ELF with DT_NEEDED libc.so.6."""

@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .elfutil import get_needed_libs
+from .elfutil import get_debuglink, get_needed_libs
 from .glibc import GlibcInstall, find_library
 
 PATCHED_SUFFIX = ".patched"
@@ -38,6 +38,27 @@ def _make_patched_copy(binary: Path) -> Path:
     return patched
 
 
+def _find_debug_file(debug_dir: Path, lib: Path) -> Path | None:
+    # Ubuntu libc6-dbg names debug files after the build-id hash recorded in
+    # the lib's .gnu_debuglink. GDB resolves <binary-dir>/.debug/<debuglink>,
+    # so the hash name must be kept verbatim when copying.
+    link = get_debuglink(lib)
+    if link and (debug_dir / link).is_file():
+        return debug_dir / link
+
+    exact = debug_dir / lib.name
+    if exact.is_file():
+        return exact
+
+    # Legacy prefixed debug files. Trailing dash: "libc-" must not match
+    # libcidn-/libcrypt-, "libm-" must not match libmvec-/libmemusage.
+    prefix = lib.name.split("-")[0] + "-"
+    for candidate in sorted(debug_dir.iterdir()):
+        if candidate.is_file() and candidate.name.startswith(prefix):
+            return candidate
+    return None
+
+
 def _copy_debug_files(glibc: GlibcInstall, copied_libs: list[Path], target_dir: Path):
     debug_dir = glibc.lib_dir / ".debug"
     if not debug_dir.is_dir():
@@ -46,14 +67,9 @@ def _copy_debug_files(glibc: GlibcInstall, copied_libs: list[Path], target_dir: 
     target_debug.mkdir(exist_ok=True)
     count = 0
     for lib in copied_libs:
-        dbg_src = debug_dir / lib.name
-        if not dbg_src.exists():
-            for candidate in debug_dir.iterdir():
-                if candidate.name.startswith(lib.name.split("-")[0]):
-                    dbg_src = candidate
-                    break
-        if dbg_src.exists():
-            shutil.copy2(dbg_src, target_debug / lib.name)
+        dbg_src = _find_debug_file(debug_dir, lib)
+        if dbg_src is not None:
+            shutil.copy2(dbg_src, target_debug / dbg_src.name)
             count += 1
     return count
 

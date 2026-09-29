@@ -5,23 +5,27 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pwnlibc.config import MIRRORS
 from pwnlibc.downloader import (
     DEB_PATTERN,
     DBG_PATTERN,
     DebPackage,
+    _download_file,
     _extract_deb,
     _extract_dbg_deb,
     _fetch_index,
+    download_source,
     scrape_available,
     sha256_file,
     verify_against_deb,
 )
-from tests.conftest import SAMPLE_MIRROR_HTML
+from tests.conftest import SAMPLE_MIRROR_HTML, SAMPLE_OLD_UBUNTU_MIRROR_HTML
 
 
 class TestDebPatterns:
@@ -106,6 +110,177 @@ class TestScrapeAvailableLive:
         versions = {p.version for p in packages}
         # These versions should always exist on the Ubuntu mirror
         assert "2.35" in versions or "2.31" in versions or len(versions) > 5
+
+
+class TestDebPackageMirror:
+    """The mirror field must survive scrape → pick → download."""
+
+    def test_mirror_default(self):
+        pkg = DebPackage(
+            version="2.31",
+            full_id="2.31-0ubuntu9_amd64",
+            arch="amd64",
+            filename="libc6_2.31-0ubuntu9_amd64.deb",
+            dbg_filename=None,
+        )
+        assert pkg.mirror == "ubuntu"
+
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_scrape_records_mirror(self, mock_fetch):
+        mock_fetch.return_value = SAMPLE_OLD_UBUNTU_MIRROR_HTML
+        packages = scrape_available("old-ubuntu")
+        assert packages
+        assert all(p.mirror == "old-ubuntu" for p in packages)
+
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_scrape_records_explicit_mirror(self, mock_fetch):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        packages = scrape_available("ubuntu")
+        assert packages
+        assert all(p.mirror == "ubuntu" for p in packages)
+
+
+class _FakeResponse:
+    """urlopen() response yielding fixed chunks, then b'' or an exception."""
+
+    def __init__(self, chunks, final_exc=None):
+        self.headers = {"Content-Length": "100"}
+        self._chunks = list(chunks)
+        self._final_exc = final_exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, n=-1):
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._final_exc is not None:
+            raise self._final_exc
+        return b""
+
+
+class TestDownloadFileAtomic:
+    """Interrupted downloads must not leave truncated files in the cache."""
+
+    @patch("pwnlibc.downloader.urllib.request.urlopen")
+    def test_success_replaces_dest(self, mock_urlopen, tmp_path):
+        mock_urlopen.return_value = _FakeResponse([b"ab", b"cd"])
+        dest = tmp_path / "libc6_2.31-0ubuntu9.16_amd64.deb"
+        seen = []
+        _download_file("http://example.com/x.deb", dest,
+                       progress_cb=lambda d, t: seen.append((d, t)))
+        assert dest.read_bytes() == b"abcd"
+        assert not dest.with_name(dest.name + ".part").exists()
+        assert seen == [(2, 100), (4, 100)]
+
+    @patch("pwnlibc.downloader.urllib.request.urlopen")
+    def test_interrupt_mid_download_leaves_no_partial(self, mock_urlopen, tmp_path):
+        """Ctrl-C after partial writes: neither dest nor .part remains."""
+        mock_urlopen.return_value = _FakeResponse([b"ab", b"cd"], final_exc=KeyboardInterrupt())
+        dest = tmp_path / "libc6_2.31-0ubuntu9.16_amd64.deb"
+        with pytest.raises(KeyboardInterrupt):
+            _download_file("http://example.com/x.deb", dest)
+        assert not dest.exists()
+        assert not dest.with_name(dest.name + ".part").exists()
+
+    @patch("pwnlibc.downloader.urllib.request.urlopen")
+    def test_http_error_leaves_no_partial(self, mock_urlopen, tmp_path):
+        mock_urlopen.side_effect = urllib.error.URLError("boom")
+        dest = tmp_path / "libc6_2.31-0ubuntu9.16_amd64.deb"
+        with pytest.raises(urllib.error.URLError):
+            _download_file("http://example.com/x.deb", dest)
+        assert not dest.exists()
+        assert not dest.with_name(dest.name + ".part").exists()
+
+    @patch("pwnlibc.downloader.urllib.request.urlopen")
+    def test_existing_dest_not_clobbered_on_failure(self, mock_urlopen, tmp_path):
+        """A failed re-download must not corrupt an already cached file."""
+        dest = tmp_path / "libc6_2.31-0ubuntu9.16_amd64.deb"
+        dest.write_bytes(b"good")
+        mock_urlopen.return_value = _FakeResponse([b"bad"], final_exc=RuntimeError("reset"))
+        with pytest.raises(RuntimeError):
+            _download_file("http://example.com/x.deb", dest)
+        assert dest.read_bytes() == b"good"
+        assert not dest.with_name(dest.name + ".part").exists()
+
+
+class TestDownloadSourceUrl:
+    """download_source(url=...) must skip its internal availability check."""
+
+    URL = "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
+
+    @patch("pwnlibc.builder.check_source_available")
+    @patch("pwnlibc.downloader.subprocess.run")
+    @patch("pwnlibc.downloader._download_file")
+    def test_url_passthrough_skips_check(self, mock_dl, mock_run, mock_check, tmp_path):
+        download_source("2.31", tmp_path, url=self.URL)
+        mock_check.assert_not_called()
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args[0][0] == self.URL
+        assert mock_run.call_args[0][0][:2] == ["tar", "xf"]
+        assert (tmp_path / "2.31" / "source").is_dir()
+
+    @patch("pwnlibc.downloader.subprocess.run")
+    @patch("pwnlibc.downloader._download_file")
+    def test_url_used_for_tarball_name(self, mock_dl, mock_run, tmp_path):
+        download_source("2.31", tmp_path, url=self.URL)
+        tarball = mock_run.call_args[0][0][2]
+        assert Path(tarball).name == "glibc-2.31.tar.xz"
+
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    def test_no_url_does_internal_check(self, mock_check, tmp_path):
+        with pytest.raises(RuntimeError, match="not available"):
+            download_source("2.31", tmp_path)
+        mock_check.assert_called_once_with("2.31")
+
+
+class TestVerifyAgainstDebMirror:
+    """verify_against_deb defaults to pkg.mirror so EOL .debs resolve."""
+
+    def _pkg(self):
+        return DebPackage(
+            version="2.19",
+            full_id="2.19-0ubuntu6.15_amd64",
+            arch="amd64",
+            filename="libc6_2.19-0ubuntu6.15_amd64.deb",
+            dbg_filename=None,
+            mirror="old-ubuntu",
+        )
+
+    @staticmethod
+    def _install(glibc_dir):
+        lib = glibc_dir / "2.19" / "amd64" / "lib"
+        lib.mkdir(parents=True, exist_ok=True)
+        (lib / "libc.so.6").write_bytes(b"contents")
+
+    @patch("pwnlibc.downloader._extract_deb")
+    @patch("pwnlibc.downloader._download_file")
+    def test_defaults_to_pkg_mirror(self, mock_dl, mock_extract, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        self._install(glibc_dir)
+
+        def fake_extract(deb_path, out_dir, arch):
+            (out_dir / "libc.so.6").write_bytes(b"contents")
+        mock_extract.side_effect = fake_extract
+
+        results = verify_against_deb(self._pkg(), glibc_dir)
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args[0][0] == MIRRORS["old-ubuntu"] + "libc6_2.19-0ubuntu6.15_amd64.deb"
+        assert any(status == "MATCH" for _, status, _ in results)
+
+    @patch("pwnlibc.downloader._extract_deb")
+    @patch("pwnlibc.downloader._download_file")
+    def test_explicit_mirror_still_wins(self, mock_dl, mock_extract, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        self._install(glibc_dir)
+        mock_extract.side_effect = lambda p, out, a: None
+
+        verify_against_deb(self._pkg(), glibc_dir, mirror="ubuntu")
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args[0][0].startswith(MIRRORS["ubuntu"])
 
 
 class TestSha256File:

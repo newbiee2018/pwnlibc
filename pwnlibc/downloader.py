@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ class DebPackage:
     arch: str
     filename: str
     dbg_filename: str | None
+    mirror: str = "ubuntu"
 
 
 def _fetch_index(url: str) -> str:
@@ -69,25 +71,37 @@ def scrape_available(mirror: str = "ubuntu") -> list[DebPackage]:
             arch=arch,
             filename=filename,
             dbg_filename=dbgs.get(key),
+            mirror=mirror,
         ))
 
     return packages
 
 
 def _download_file(url: str, dest: Path, progress_cb=None):
+    # Download to a .part file and rename on success: a Ctrl-C mid-download
+    # must not leave a truncated file that callers would treat as complete.
     req = urllib.request.Request(url, headers={"User-Agent": "pwnlibc/0.1"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        total = int(resp.headers.get("Content-Length", 0))
-        downloaded = 0
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_cb:
-                    progress_cb(downloaded, total)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb:
+                        progress_cb(downloaded, total)
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _extract_deb(deb_path: Path, out_dir: Path, arch: str):
@@ -170,6 +184,10 @@ def _extract_dbg_deb(deb_path: Path, out_dir: Path, arch: str):
         debug_out = out_dir / ".debug"
         debug_out.mkdir(parents=True, exist_ok=True)
 
+        # Flatten .build-id/xx/hash.debug into .debug/hash.debug: Ubuntu libc's
+        # .gnu_debuglink names the bare hash file, and GDB's default
+        # <objdir>/.debug/<name> lookup finds it flat (verified with real GDB).
+        # Do not "clean this up" into a nested layout — it breaks symbol resolution.
         for p in search_paths:
             if p.is_dir():
                 for item in p.rglob("*"):
@@ -211,11 +229,13 @@ def download_glibc(
     return out_dir.parent
 
 
-def download_source(version: str, glibc_dir: Path, progress_cb=None) -> Path:
+def download_source(version: str, glibc_dir: Path, progress_cb=None,
+                    url: str | None = None) -> Path:
     from .builder import check_source_available
     from .config import gnu_source_version
 
-    url = check_source_available(version)
+    if url is None:
+        url = check_source_available(version)
     if url is None:
         src_ver = gnu_source_version(version)
         raise RuntimeError(f"Source not available on ftp.gnu.org for glibc-{src_ver}")
@@ -248,9 +268,12 @@ def sha256_file(path: Path) -> str:
 def verify_against_deb(
     pkg: DebPackage,
     glibc_dir: Path,
-    mirror: str = "ubuntu",
+    mirror: str | None = None,
     cache_dir: Path | None = None,
 ) -> list[tuple[str, str, str]]:
+    # Default to the mirror the package was actually scraped from — the
+    # reference .deb may not exist on the primary mirror (EOL versions).
+    mirror = mirror or pkg.mirror
     mirror_url = MIRRORS[mirror]
     if cache_dir is None:
         cache_dir = glibc_dir / ".cache"

@@ -125,6 +125,57 @@ class TestCheckBuildDeps:
         missing = check_build_deps("i686")
         assert "gcc" in missing
 
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("shutil.which")
+    def test_i686_missing_multilib_detected(self, mock_which, mock_run):
+        """gcc printing bare 'libgcc.a' for -m32 means no 32-bit multilib set."""
+        mock_which.return_value = "/usr/bin/fake"
+        mock_run.return_value = MagicMock(returncode=0, stdout="libgcc.a\n", stderr="")
+        missing = check_build_deps("i686")
+        assert any("gcc-multilib" in m for m in missing)
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("shutil.which")
+    def test_i686_multilib_present_not_reported(self, mock_which, mock_run):
+        """A full libgcc.a path means multilib is installed."""
+        mock_which.return_value = "/usr/bin/fake"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="/usr/lib/gcc/x86_64-linux-gnu/12/32/libgcc.a\n",
+            stderr="",
+        )
+        missing = check_build_deps("i686")
+        assert missing == []
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("shutil.which")
+    def test_i686_multilib_probe_failure_detected(self, mock_which, mock_run):
+        """Non-zero exit from the -m32 probe also means gcc cannot compile 32-bit."""
+        mock_which.return_value = "/usr/bin/fake"
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="gcc: error")
+        missing = check_build_deps("i686")
+        assert any("gcc-multilib" in m for m in missing)
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("shutil.which")
+    def test_i686_no_probe_when_gcc_missing(self, mock_which, mock_run):
+        """The -m32 probe only runs when gcc itself was found."""
+        def which_side_effect(name):
+            if name == "gcc":
+                return None
+            return "/usr/bin/fake"
+        mock_which.side_effect = which_side_effect
+        check_build_deps("i686")
+        mock_run.assert_not_called()
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("shutil.which")
+    def test_amd64_no_multilib_probe(self, mock_which, mock_run):
+        """The -m32 probe is i686-only."""
+        mock_which.return_value = "/usr/bin/fake"
+        check_build_deps("amd64")
+        mock_run.assert_not_called()
+
 
 class TestGetInstallCmd:
     """get_install_cmd generates correct apt install commands."""
@@ -355,6 +406,61 @@ class TestBuildGlibcStructure:
         assert result.is_dir()
 
 
+class TestBuildUsesDownloader:
+    """build_glibc delegates downloading to downloader._download_file."""
+
+    @patch("pwnlibc.builder._download_file")
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_download_delegated(self, mock_urlopen, mock_run, mock_download, tmp_path):
+        """Source download goes through _download_file with URL and basename dest."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_urlopen.return_value = _make_mock_urlopen()
+        mock_run.side_effect = _make_build_run_side_effect("2.31")
+
+        build_glibc("2.31", "amd64", glibc_dir)
+
+        mock_download.assert_called_once()
+        url, dest = mock_download.call_args[0][:2]
+        assert url == "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
+        assert dest.name == "glibc-2.31.tar.xz"
+
+    @patch("pwnlibc.builder._download_file")
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_download_progress_adapted(self, mock_urlopen, mock_run, mock_download, tmp_path):
+        """The (downloaded, total) callback is wrapped into (stage, downloaded, total)."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_urlopen.return_value = _make_mock_urlopen()
+        mock_run.side_effect = _make_build_run_side_effect("2.31")
+
+        calls = []
+        def progress_cb(stage, downloaded, total):
+            calls.append((stage, downloaded, total))
+
+        build_glibc("2.31", "amd64", glibc_dir, progress_cb=progress_cb)
+
+        dl_cb = mock_download.call_args[0][2]
+        assert callable(dl_cb)
+        dl_cb(2048, 4096)
+        assert ("downloading source", 2048, 4096) in calls
+
+    @patch("pwnlibc.builder._download_file")
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_no_progress_cb_passes_none(self, mock_urlopen, mock_run, mock_download, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_urlopen.return_value = _make_mock_urlopen()
+        mock_run.side_effect = _make_build_run_side_effect("2.31")
+
+        build_glibc("2.31", "amd64", glibc_dir)
+
+        assert mock_download.call_args[0][2] is None
+
+
 class TestBuildProgressCallback:
     """Progress callback receives correct phase names."""
 
@@ -404,6 +510,7 @@ class TestBuildConfigureArgs:
         build_glibc("2.31", "amd64", glibc_dir)
         assert configure_cmd is not None
         assert not any("--host" in arg for arg in configure_cmd)
+        assert not any(arg.startswith("--build=") for arg in configure_cmd)
 
     @patch("pwnlibc.builder.subprocess.run")
     @patch("urllib.request.urlopen")
@@ -433,6 +540,30 @@ class TestBuildConfigureArgs:
 
     @patch("pwnlibc.builder.subprocess.run")
     @patch("urllib.request.urlopen")
+    def test_arm64_no_build_flag(self, mock_urlopen, mock_run, tmp_path):
+        """Cross builds must not hardcode --build; config.guess detects the host."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_urlopen.return_value = _make_mock_urlopen()
+
+        configure_cmd = None
+        base_effect = _make_build_run_side_effect("2.35")
+
+        def run_side_effect(cmd, **kwargs):
+            nonlocal configure_cmd
+            if "configure" in str(cmd[0]):
+                configure_cmd = cmd
+            return base_effect(cmd, **kwargs)
+
+        mock_run.side_effect = run_side_effect
+
+        build_glibc("2.35", "arm64", glibc_dir)
+        assert configure_cmd is not None
+        assert "--host=aarch64-linux-gnu" in configure_cmd
+        assert not any(arg.startswith("--build=") for arg in configure_cmd)
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
     def test_i686_has_m32_flag(self, mock_urlopen, mock_run, tmp_path):
         """i686 build should set CC='gcc -m32'."""
         glibc_dir = tmp_path / "glibc"
@@ -453,6 +584,30 @@ class TestBuildConfigureArgs:
         build_glibc("2.27", "i686", glibc_dir)
         assert configure_env is not None
         assert configure_env.get("CC") == "gcc -m32"
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_i686_keeps_host_and_build(self, mock_urlopen, mock_run, tmp_path):
+        """The i686 -m32 recipe keeps its explicit --host and --build."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_urlopen.return_value = _make_mock_urlopen()
+
+        configure_cmd = None
+        base_effect = _make_build_run_side_effect("2.27")
+
+        def run_side_effect(cmd, **kwargs):
+            nonlocal configure_cmd
+            if "configure" in str(cmd[0]):
+                configure_cmd = cmd
+            return base_effect(cmd, **kwargs)
+
+        mock_run.side_effect = run_side_effect
+
+        build_glibc("2.27", "i686", glibc_dir)
+        assert configure_cmd is not None
+        assert "--host=i686-linux-gnu" in configure_cmd
+        assert "--build=i686-linux-gnu" in configure_cmd
 
 
 class TestBuildFailure:

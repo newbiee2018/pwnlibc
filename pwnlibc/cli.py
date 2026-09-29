@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import click
@@ -19,7 +21,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from .config import ALL_ARCHES, ARCH_INFO, BUILD_DEPS, DEFAULT_GLIBC_DIR, MIRRORS, X86_ARCHES, parse_version, uses_new_naming
+from .config import ALL_ARCHES, ARCH_INFO, DEFAULT_GLIBC_DIR, MIRRORS, X86_ARCHES, parse_version
 from .downloader import (
     DebPackage,
     download_glibc,
@@ -81,12 +83,48 @@ def _mirrors_for_arch(arch: str) -> list[str]:
 
 def _scrape_mirrors(mirrors: set[str]) -> list[DebPackage]:
     pkgs: list[DebPackage] = []
-    for m in sorted(mirrors):
-        try:
-            pkgs.extend(scrape_available(m))
-        except Exception as e:
-            console.print(f"[yellow]Failed to fetch {m}: {e}[/yellow]")
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(mirrors)))) as executor:
+        futures = {executor.submit(scrape_available, m): m for m in sorted(mirrors)}
+        for future in as_completed(futures):
+            m = futures[future]
+            try:
+                pkgs.extend(future.result())
+            except Exception as e:
+                console.print(f"[yellow]Failed to fetch {m}: {e}[/yellow]")
     return pkgs
+
+
+def _deb_version_key(ver: str) -> tuple:
+    """dpkg-style ordering for Ubuntu glibc revisions like 2.31-0ubuntu9.16.
+
+    Digit runs compare numerically; '~' sorts before everything (so ESM
+    revisions like 3.1~esm1 sort below the final 3.1); end-of-string sorts
+    above '~' but below letters. Covers the character set that actually
+    appears in Ubuntu pool revisions (digits, letters, '.', '+', '-', '~').
+    """
+    key = []
+    for tok in re.split(r"(\d+)", ver):
+        if tok.isdigit():
+            key.append((1, int(tok), "\x00"))
+        elif tok:
+            key.append((0, 0, tok.replace("~", "\x01")))
+    key.append((0, 0, "\x02"))  # end-of-string sentinel
+    return tuple(key)
+
+
+def _pkg_beats(a: DebPackage, b: DebPackage) -> bool:
+    """Whether a replaces b as the best pick: newer dpkg-style revision, or on
+    an exact revision tie the one from the earlier (primary) mirror."""
+    key_a = _deb_version_key(a.full_id.rsplit("_", 1)[0])
+    key_b = _deb_version_key(b.full_id.rsplit("_", 1)[0])
+    if key_a != key_b:
+        return key_a > key_b
+    mirrors = _mirrors_for_arch(a.arch)
+
+    def rank(m: str) -> int:
+        return mirrors.index(m) if m in mirrors else len(mirrors)
+
+    return rank(a.mirror) < rank(b.mirror)
 
 
 def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
@@ -94,7 +132,7 @@ def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
     for pkg in packages:
         key = (pkg.version, pkg.arch)
         existing = best.get(key)
-        if existing is None or pkg.full_id > existing.full_id:
+        if existing is None or _pkg_beats(pkg, existing):
             best[key] = pkg
     return best
 
@@ -222,7 +260,6 @@ def available(ctx, arch, mirror, check_source):
 
     source_avail: dict[str, bool] = {}
     if check_source:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         from .builder import check_source_available
 
         unique_versions = sorted(set(by_version.keys()), key=lambda v: parse_version(v))
@@ -248,7 +285,7 @@ def available(ctx, arch, mirror, check_source):
     for ver in sorted(by_version.keys(), key=lambda v: parse_version(v)):
         for a in sorted(by_version[ver].keys()):
             pkg = by_version[ver][a]
-            pkg_mirror = ARCH_INFO.get(a, {}).get("mirror", "ubuntu")
+            pkg_mirror = pkg.mirror
 
             key = (ver, a)
             if key in installed_map:
@@ -321,14 +358,14 @@ def patch(ctx, binary, glibc_version, arch, mode, variant, no_rpath):
         )
         sys.exit(1)
 
-    glibc = _resolve_variant(glibc_version, arch, glibc_dir, variant, mode, no_rpath)
+    glibc = _resolve_variant(glibc_version, arch, glibc_dir, variant)
     if glibc is None:
         sys.exit(1)
 
     _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath)
 
 
-def _resolve_variant(glibc_version, arch, glibc_dir, variant, mode, no_rpath):
+def _resolve_variant(glibc_version, arch, glibc_dir, variant):
     """Resolve which glibc variant to use. Returns GlibcInstall or None."""
     if variant != "auto":
         try:
@@ -446,6 +483,16 @@ def _prompt_no_debug(glibc_version, arch, glibc_dir, deb_install):
         return deb_install
 
 
+def _pick_source_subdir(source_dir: Path) -> Path | None:
+    """Deterministically pick the extracted source subdirectory:
+    first sorted dir named glibc-*, else first sorted subdir, else None."""
+    subdirs = sorted(d for d in source_dir.iterdir() if d.is_dir())
+    for d in subdirs:
+        if d.name.startswith("glibc-"):
+            return d
+    return subdirs[0] if subdirs else None
+
+
 def _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath):
     """Perform the actual patchelf operation and print results."""
     if glibc.variant != "deb":
@@ -472,7 +519,7 @@ def _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath):
     source_dir = glibc_dir / glibc_version / "source"
     if glibc.has_source:
         build_path = get_debug_build_path(glibc)
-        source_subdir = next(source_dir.iterdir(), None) if source_dir.is_dir() else None
+        source_subdir = _pick_source_subdir(source_dir) if source_dir.is_dir() else None
         if build_path and source_subdir:
             console.print(
                 f"\n[dim]GDB source mapping:[/dim]\n"
@@ -493,7 +540,11 @@ def _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath):
 @cli.command()
 @click.argument("binary", type=click.Path(exists=True, path_type=Path))
 def restore(binary):
-    """Remove .patched file (and copied libs from copy-mode patching)."""
+    """Remove the .patched file created by pwnlibc patch, or restore a legacy .bak backup.
+
+    Copied libc-*.so files from copy-mode patching are deliberately not
+    deleted — they cannot be safely attributed to pwnlibc vs challenge files.
+    """
     binary = binary.resolve()
 
     from .patcher import PATCHED_SUFFIX
@@ -571,14 +622,17 @@ def remove(ctx, versions, arch, variant, keep_cache):
                     _rmtree_verbose(built_dir, f"{a}-built")
                     removed_any = True
 
-        if variant in ("source", "all"):
+        # With --variant all + a specific --arch, other arches may still need the
+        # shared source/ dir — so source only goes via the auto-removal rule below.
+        remove_source_now = variant == "source" or (variant == "all" and arch == "all")
+        if remove_source_now:
             source_dir = ver_dir / "source"
             if source_dir.is_dir():
                 _rmtree_verbose(source_dir, "source")
                 removed_any = True
 
         # Auto-remove source when no deb/built remains
-        if variant not in ("source", "all") and ver_dir.is_dir():
+        if not remove_source_now and ver_dir.is_dir():
             has_lib = any(
                 d.is_dir() and d.name != "source" and not d.name.startswith(".")
                 for d in ver_dir.iterdir()
@@ -685,13 +739,14 @@ def source_download(ctx, versions):
             continue
 
         console.print(f"Checking {version}...", end=" ")
-        if not check_source_available(version):
+        url = check_source_available(version)
+        if not url:
             console.print("[yellow]not available on ftp.gnu.org[/yellow]")
             continue
         console.print("downloading...")
 
         try:
-            download_source(version, glibc_dir)
+            download_source(version, glibc_dir, url=url)
             console.print(f"  [green]{version} source installed at {source_dir}[/green]")
         except Exception as e:
             console.print(f"  [red]{version} failed: {e}[/red]")
@@ -772,7 +827,6 @@ def source_available(ctx, versions):
     """
     glibc_dir = ctx.obj["glibc_dir"]
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from .builder import check_source_available
     from .config import GNU_SOURCE_BASE, gnu_source_version
 
@@ -859,6 +913,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
     glibc_dir = ctx.obj["glibc_dir"]
     _check_writable(glibc_dir)
     archs_to_download = X86_ARCHES if arch == "all" else [arch]
+    from .builder import check_source_available
 
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
@@ -898,7 +953,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                 def cb(downloaded, total, tid=task_id):
                     progress.update(tid, total=total, completed=downloaded)
 
-                dl_mirror = _mirrors_for_arch(pkg_arch)[0] if mirror == "auto" else mirror
+                dl_mirror = pkg.mirror if mirror == "auto" else mirror
                 try:
                     download_glibc(
                         pkg, glibc_dir, mirror=dl_mirror,
@@ -916,10 +971,14 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
             src_dir = glibc_dir / version / "source"
             if not src_dir.is_dir() or not any(src_dir.iterdir()):
                 console.print(f"[dim]Downloading source for {version}...[/dim]")
-                try:
-                    download_source(version, glibc_dir)
-                except Exception as e:
-                    console.print(f"[yellow]Source: {e}[/yellow]")
+                url = check_source_available(version)
+                if url is None:
+                    console.print(f"[yellow]Source: not available on ftp.gnu.org for {version}[/yellow]")
+                else:
+                    try:
+                        download_source(version, glibc_dir, url=url)
+                    except Exception as e:
+                        console.print(f"[yellow]Source: {e}[/yellow]")
 
     if not any_success:
         sys.exit(1)
@@ -999,7 +1058,7 @@ def download_all(ctx, arch, mirror, with_dbg, check):
 
     for (ver, a), pkg in sorted({**to_download, **to_add_dbg}.items(),
                                   key=lambda x: (parse_version(x[0][0]), x[0][1])):
-        dl_mirror = _mirrors_for_arch(a)[0] if mirror == "auto" else mirror
+        dl_mirror = pkg.mirror if mirror == "auto" else mirror
         is_dbg_only = (ver, a) in to_add_dbg
         try:
             download_glibc(pkg, glibc_dir, mirror=dl_mirror, include_dbg=with_dbg)
@@ -1089,7 +1148,11 @@ def build(ctx, versions, arch):
 @click.option("--mirror", type=click.Choice(ALL_MIRRORS), default="auto")
 @click.pass_context
 def verify(ctx, fix, verbose, mirror):
-    """Verify installed glibc against official Ubuntu packages."""
+    """Verify installed glibc against official Ubuntu packages.
+
+    Exits with status 1 when problems (MISSING/MISMATCH/errors) are found,
+    or with --fix when at least one fix attempt fails. Exits 0 otherwise.
+    """
     glibc_dir = ctx.obj["glibc_dir"]
     if fix:
         _check_writable(glibc_dir)
@@ -1121,6 +1184,7 @@ def verify(ctx, fix, verbose, mirror):
     versions_to_fix = []
     match_count = 0
     problem_count = 0
+    fix_failed = 0
     has_rows = False
 
     for inst in installs:
@@ -1132,7 +1196,7 @@ def verify(ctx, fix, verbose, mirror):
             continue
 
         console.print(f"[dim]Verifying {inst.version}/{inst.arch}...[/dim]")
-        dl_mirror = _mirrors_for_arch(inst.arch)[0] if mirror == "auto" else mirror
+        dl_mirror = pkg.mirror if mirror == "auto" else mirror
         try:
             results = verify_against_deb(pkg, glibc_dir, mirror=dl_mirror)
         except Exception as e:
@@ -1174,12 +1238,18 @@ def verify(ctx, fix, verbose, mirror):
     if fix and versions_to_fix:
         console.print(f"\n[bold]Fixing {len(versions_to_fix)} installs...[/bold]")
         for inst, pkg in versions_to_fix:
-            dl_mirror = _mirrors_for_arch(inst.arch)[0] if mirror == "auto" else mirror
+            dl_mirror = pkg.mirror if mirror == "auto" else mirror
             try:
                 download_glibc(pkg, glibc_dir, mirror=dl_mirror)
                 console.print(f"  [green]{inst.version}/{inst.arch} replaced[/green]")
             except Exception as e:
                 console.print(f"  [red]{inst.version}/{inst.arch} fix failed: {e}[/red]")
+                fix_failed += 1
+
+    # Non-zero exit so scripts/CI can detect problems; with --fix only a
+    # failed fix attempt is an error (the problems themselves were addressed).
+    if (not fix and problem_count > 0) or (fix and fix_failed > 0):
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1228,14 +1298,14 @@ def setup(ctx, archive_dir, target_dir, variant):
     glibc_dir = ctx.obj["glibc_dir"]
     if target_dir is None:
         target_dir = glibc_dir
-    _check_writable(target_dir if target_dir.exists() else glibc_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _check_writable(target_dir)
 
     archives = sorted(archive_dir.glob("*.tar.gz"))
     if not archives:
         console.print(f"[red]No .tar.gz files found in {archive_dir}[/red]")
         sys.exit(1)
 
-    target_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Extracting {len(archives)} archives to {target_dir}")
 
     import tempfile
@@ -1246,7 +1316,11 @@ def setup(ctx, archive_dir, target_dir, variant):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             with tarfile.open(arc, "r:gz") as tf:
-                tf.extractall(path=tmp_path)
+                try:
+                    tf.extractall(path=tmp_path, filter="data")
+                except TypeError:
+                    # Python without the (backported) filter= parameter
+                    tf.extractall(path=tmp_path)
 
             extracted = tmp_path / version
             if not extracted.is_dir():

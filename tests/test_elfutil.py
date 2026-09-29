@@ -4,8 +4,8 @@ import struct
 
 import pytest
 
-from pwnlibc.elfutil import detect_arch, get_needed_libs, has_debug_info
-from tests.conftest import _build_minimal_elf
+from pwnlibc.elfutil import detect_arch, get_debuglink, get_needed_libs, has_debug_info
+from tests.conftest import _build_debuglink_elf, _build_minimal_elf
 
 
 class TestDetectArch:
@@ -134,3 +134,23 @@ class TestHasDebugInfo:
         f = tmp_path / "not_elf"
         f.write_bytes(b"not an elf file at all")
         assert has_debug_info(f) is False
+
+
+class TestGetDebuglink:
+    def test_returns_debuglink_filename(self, tmp_path):
+        hash_name = "92732f783158c66fb4f3756458ca24e46e827d.debug"
+        f = _build_debuglink_elf(tmp_path / "with_link", hash_name)
+        assert get_debuglink(f) == hash_name
+
+    def test_no_debuglink_section(self, minimal_elf_amd64):
+        assert get_debuglink(minimal_elf_amd64) is None
+
+    def test_non_elf_returns_none(self, tmp_path):
+        f = tmp_path / "not_elf"
+        f.write_bytes(b"not an elf file at all")
+        assert get_debuglink(f) is None
+
+    def test_truncated_elf_returns_none(self, tmp_path):
+        f = tmp_path / "truncated"
+        f.write_bytes(b"\x7fELF" + b"\x00" * 100)
+        assert get_debuglink(f) is None

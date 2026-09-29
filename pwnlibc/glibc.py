@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import mmap
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,7 +13,7 @@ from .config import (
     parse_version,
     uses_new_naming,
 )
-from .elfutil import has_debug_info
+from .elfutil import get_debuglink, has_debug_info
 
 
 @dataclass
@@ -54,13 +56,10 @@ def resolve_lib_paths(version: str, arch: str, glibc_dir: Path,
     lib_dir = base_dir / "lib"
 
     if not lib_dir.is_dir():
-        for alt in [
-            base_dir / "usr" / "lib",
-            base_dir / glibc_dir.name / version / f"{arch}-built" / "lib",
-        ]:
-            if alt.is_dir():
-                lib_dir = alt
-                break
+        # Old pre-merge downloads kept libs under usr/lib
+        alt = base_dir / "usr" / "lib"
+        if alt.is_dir():
+            lib_dir = alt
         else:
             raise FileNotFoundError(
                 f"Glibc {version} ({arch}, {variant}) not found at {lib_dir}. "
@@ -127,16 +126,33 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
 
 
 def get_debug_build_path(glibc: GlibcInstall) -> str | None:
-    import re
-    for path in [glibc.lib_dir / ".debug" / glibc.libc_path.name, glibc.libc_path]:
+    # deb(dbg) installs store the debug file under the build-id hash named
+    # by .gnu_debuglink, not under the libc's own file name.
+    candidates = []
+    link = get_debuglink(glibc.libc_path)
+    if link:
+        candidates.append(glibc.lib_dir / ".debug" / link)
+    candidates.append(glibc.lib_dir / ".debug" / glibc.libc_path.name)
+    candidates.append(glibc.libc_path)
+
+    pattern = rb"/build/glibc-[^/]+/glibc-" + glibc.version.encode()
+    for path in candidates:
         if not path.exists():
             continue
         try:
             with open(path, "rb") as f:
-                data = f.read()
-            m = re.search(rb"/build/glibc-[^/]+/glibc-" + glibc.version.encode(), data)
-            if m:
-                return m.group(0).decode("ascii")
+                try:
+                    # mmap: debug files run 30-100 MB, don't load them whole.
+                    # The group must be read before the mmap closes -- match
+                    # access after close raises TypeError.
+                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                        m = re.search(pattern, mm)
+                        if m:
+                            return m.group(0).decode("ascii")
+                except ValueError:  # zero-length file, mmap needs size > 0
+                    m = re.search(pattern, f.read())
+                    if m:
+                        return m.group(0).decode("ascii")
         except Exception:
             continue
     return None
@@ -147,8 +163,15 @@ def find_library(glibc: GlibcInstall, soname: str) -> Path | None:
     if direct.exists():
         return direct.resolve()
 
-    base = soname.split(".so")[0]
-    for f in glibc.lib_dir.iterdir():
-        if f.name.startswith(base) and f.name.endswith(".so") and f.is_file():
-            return f
-    return None
+    # Old-naming installs carry versioned files ("libm-2.31.so") instead of
+    # the soname. Trailing dash so "libm-" never matches libmvec/libmemusage.
+    base = soname.split(".so")[0] + "-"
+    matches = [
+        f for f in glibc.lib_dir.iterdir()
+        if f.is_file() and f.name.endswith(".so") and f.name.startswith(base)
+    ]
+    if not matches:
+        return None
+    # Shortest name wins (e.g. libm-2.31.so over libmvec-2.31.so), name as
+    # tie-break so the pick is deterministic regardless of iterdir() order
+    return sorted(matches, key=lambda f: (len(f.name), f.name))[0]

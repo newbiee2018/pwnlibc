@@ -193,6 +193,33 @@ def get_needed_libs(path: Path) -> list[str]:
     return needed
 
 
+def get_debuglink(path: Path) -> str | None:
+    """Return the .gnu_debuglink filename of an ELF, or None.
+
+    Ubuntu debug debs name separate debug files after the build-id hash,
+    recorded in the library's .gnu_debuglink section; resolving symbols
+    requires using that name, not the library's own name.
+    """
+    try:
+        with open(path, "rb") as f:
+            hdr = _read_elf_header(f)
+            sections = _read_section_headers(f, hdr)
+
+            shstrtab = sections[hdr["e_shstrndx"]]
+            f.seek(shstrtab["sh_offset"])
+            shstrtab_data = f.read(shstrtab["sh_size"])
+
+            for sec in sections:
+                name = _read_cstring(shstrtab_data, sec["sh_name"])
+                if name == ".gnu_debuglink":
+                    f.seek(sec["sh_offset"])
+                    data = f.read(sec["sh_size"])
+                    return _read_cstring(data, 0)
+    except Exception:
+        pass
+    return None
+
+
 def has_debug_info(path: Path) -> bool:
     try:
         with open(path, "rb") as f:

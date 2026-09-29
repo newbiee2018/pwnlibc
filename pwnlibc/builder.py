@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from .config import ARCH_INFO, BUILD_DEPS, GNU_SOURCE_BASE, GNU_SOURCE_FORMATS, gnu_source_version
+from .downloader import _download_file
 
 
 def check_build_deps(arch: str) -> list[str]:
@@ -21,6 +22,12 @@ def check_build_deps(arch: str) -> list[str]:
     if arch in ("amd64", "i686"):
         if not shutil.which("gcc"):
             missing.append("gcc")
+        elif arch == "i686":
+            # gcc -m32 needs the multilib set; gcc prints the bare name when it's missing
+            r = subprocess.run(["gcc", "-m32", "-print-file-name=libgcc.a"],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or r.stdout.strip() == "libgcc.a":
+                missing.append("gcc-multilib (gcc cannot compile 32-bit)")
     else:
         bin_name = info["cross_triplet"] + "-gcc"
         if not shutil.which(bin_name):
@@ -66,8 +73,6 @@ def build_glibc(
     glibc_dir: Path,
     progress_cb=None,
 ) -> Path:
-    import urllib.request
-
     info = ARCH_INFO[arch]
     triplet = info["cross_triplet"]
     out_prefix = glibc_dir / version / f"{arch}-built"
@@ -87,19 +92,10 @@ def build_glibc(
 
         if progress_cb:
             progress_cb("downloading source", 0, 0)
-        req = urllib.request.Request(url, headers={"User-Agent": "pwnlibc/0.1"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            with open(tarball, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb:
-                        progress_cb("downloading source", downloaded, total)
+            dl_cb = lambda d, t: progress_cb("downloading source", d, t)
+        else:
+            dl_cb = None
+        _download_file(url, tarball, dl_cb)
 
         if progress_cb:
             progress_cb("extracting source", 0, 0)
@@ -138,8 +134,8 @@ def build_glibc(
             cc = f"{triplet}-gcc"
             env["CC"] = cc
             env["CXX"] = f"{triplet}-g++"
+            # --build is auto-detected by config.guess, so cross builds work from any host
             configure_args.append(f"--host={triplet}")
-            configure_args.append(f"--build=x86_64-linux-gnu")
             env["CFLAGS"] = "-g3 -O1 -U_FORTIFY_SOURCE"
 
         if progress_cb:

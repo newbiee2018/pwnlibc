@@ -1,5 +1,6 @@
 """Tests for pwnlibc.cli — Click CLI commands."""
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -8,13 +9,40 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from pwnlibc.cli import cli
-from tests.conftest import build_test_binary
+from pwnlibc.cli import _pick_best, cli
+from pwnlibc.downloader import DebPackage
+from tests.conftest import (
+    SAMPLE_MIRROR_HTML,
+    SAMPLE_OLD_UBUNTU_MIRROR_HTML,
+    build_test_binary,
+)
 
 
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+def _mk_pkg(full_id, mirror="ubuntu", arch="amd64"):
+    """Construct a DebPackage from a full id like '2.31-0ubuntu9.16_amd64'."""
+    version = full_id.rsplit("_", 1)[0].split("-")[0]
+    return DebPackage(
+        version=version,
+        full_id=full_id,
+        arch=arch,
+        filename=f"libc6_{full_id}.deb",
+        dbg_filename=None,
+        mirror=mirror,
+    )
+
+
+def _old_releases_only(mock_fetch):
+    """_fetch_index side effect: only old-releases has packages."""
+    def fetch(url):
+        if "old-releases" in url:
+            return SAMPLE_OLD_UBUNTU_MIRROR_HTML
+        return "<html></html>"
+    mock_fetch.side_effect = fetch
 
 
 class TestCliHelp:
@@ -351,3 +379,252 @@ class TestCliModuleEntry:
         )
         assert result.returncode == 0
         assert "pwnlibc" in result.stdout
+
+
+class TestPickBest:
+    """_pick_best must compare revisions dpkg-style, not lexicographically."""
+
+    @pytest.mark.parametrize("older,newer", [
+        ("2.23-0ubuntu3_amd64", "2.23-0ubuntu11.3_amd64"),
+        ("2.6.1-1ubuntu9_amd64", "2.6.1-1ubuntu10_amd64"),
+        ("2.31-0ubuntu9.16_amd64", "2.31-0ubuntu9.18_amd64"),
+        ("2.35-0ubuntu3.1~esm1_amd64", "2.35-0ubuntu3.1_amd64"),
+        ("2.19-10ubuntu2_amd64", "2.19-10ubuntu2.1_amd64"),
+    ])
+    def test_newest_revision_wins(self, older, newer):
+        for ids in ([older, newer], [newer, older]):
+            best = _pick_best([_mk_pkg(i) for i in ids])
+            assert len(best) == 1
+            assert list(best.values())[0].full_id == newer
+
+    def test_tie_prefers_primary_mirror(self):
+        """Same revision scraped from two mirrors: primary (ubuntu) wins."""
+        for mirrors in (["old-ubuntu", "ubuntu"], ["ubuntu", "old-ubuntu"]):
+            best = _pick_best([_mk_pkg("2.31-0ubuntu9.16_amd64", mirror=m) for m in mirrors])
+            assert list(best.values())[0].mirror == "ubuntu"
+
+    def test_tie_prefers_primary_mirror_non_x86(self):
+        """arm64's primary mirror is ports, not ubuntu."""
+        best = _pick_best([
+            _mk_pkg("2.35-0ubuntu3.8_arm64", mirror="old-ubuntu", arch="arm64"),
+            _mk_pkg("2.35-0ubuntu3.8_arm64", mirror="ports", arch="arm64"),
+        ])
+        assert list(best.values())[0].mirror == "ports"
+
+
+class TestMirrorPropagation:
+    """The mirror a package was scraped from must be the one downloaded from."""
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_download_uses_scraped_mirror(self, mock_fetch, mock_dl, runner, tmp_path):
+        """2.19 only exists on old-releases — must not 404 on archive.ubuntu.com."""
+        _old_releases_only(mock_fetch)
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "2.19", "--arch", "amd64", "--no-source",
+        ])
+        assert result.exit_code == 0
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args[0][0].mirror == "old-ubuntu"
+        assert mock_dl.call_args.kwargs["mirror"] == "old-ubuntu"
+
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_available_shows_actual_mirror(self, mock_fetch, runner, tmp_path):
+        """Mirror column shows where the package was found, not the arch default."""
+        mock_fetch.return_value = SAMPLE_OLD_UBUNTU_MIRROR_HTML
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "available", "--arch", "amd64", "--mirror", "old-ubuntu",
+            "--no-check-source",
+        ])
+        assert result.exit_code == 0
+        # The table row (not just the "fetching" line) names old-ubuntu
+        assert re.search(r"2\.19.*amd64.*old-ubuntu", result.output)
+
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_verify_uses_scraped_mirror(self, mock_fetch, mock_verify, runner, tmp_path):
+        _old_releases_only(mock_fetch)
+        glibc_dir = tmp_path / "glibc"
+        lib = glibc_dir / "2.19" / "amd64" / "lib"
+        lib.mkdir(parents=True)
+        (lib / "libc.so.6").write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (lib / "ld-linux-x86-64.so.2").write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+        mock_verify.return_value = [("libc.so.6", "MATCH", "deadbeefdeadbeef")]
+        result = runner.invoke(cli, ["--glibc-dir", str(glibc_dir), "verify"])
+        assert result.exit_code == 0
+        mock_verify.assert_called_once()
+        assert mock_verify.call_args.kwargs["mirror"] == "old-ubuntu"
+
+
+class TestRemoveSourceRule:
+    """--variant all + specific --arch: source follows auto-removal only."""
+
+    @staticmethod
+    def _make_install(glibc_dir, version, arch):
+        lib = glibc_dir / version / arch / "lib"
+        lib.mkdir(parents=True, exist_ok=True)
+        (lib / "libc.so.6").write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (lib / "ld-linux-x86-64.so.2").write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+    def test_remove_arch_keeps_shared_source(self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        self._make_install(glibc_dir, "2.31", "amd64")
+        self._make_install(glibc_dir, "2.31", "i686")
+        (glibc_dir / "2.31" / "source").mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir), "remove", "2.31", "--arch", "amd64",
+        ])
+        assert result.exit_code == 0
+        assert not (glibc_dir / "2.31" / "amd64").exists()
+        assert (glibc_dir / "2.31" / "i686").is_dir()
+        assert (glibc_dir / "2.31" / "source").is_dir()
+
+        # Removing the last arch takes the (now orphaned) source with it
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir), "remove", "2.31", "--arch", "i686",
+        ])
+        assert result.exit_code == 0
+        assert not (glibc_dir / "2.31" / "source").exists()
+        assert not (glibc_dir / "2.31").exists()
+
+    def test_remove_all_arches_removes_source(self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        self._make_install(glibc_dir, "2.31", "amd64")
+        self._make_install(glibc_dir, "2.31", "i686")
+        (glibc_dir / "2.31" / "source").mkdir()
+
+        result = runner.invoke(cli, ["--glibc-dir", str(glibc_dir), "remove", "2.31"])
+        assert result.exit_code == 0
+        assert not (glibc_dir / "2.31").exists()
+
+    def test_remove_variant_source_only(self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        self._make_install(glibc_dir, "2.31", "amd64")
+        (glibc_dir / "2.31" / "source").mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir), "remove", "2.31", "--variant", "source",
+        ])
+        assert result.exit_code == 0
+        assert not (glibc_dir / "2.31" / "source").exists()
+        assert (glibc_dir / "2.31" / "amd64").is_dir()
+
+
+class TestVerifyExitCode:
+    """verify must exit non-zero when problems remain (or a fix fails)."""
+
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_exit_zero_all_match(self, mock_fetch, mock_verify, runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MATCH", "deadbeefdeadbeef")]
+        result = runner.invoke(cli, ["--glibc-dir", str(populated_glibc_dir), "verify"])
+        assert result.exit_code == 0
+        assert "verified OK" in result.output
+        # Same index mocked for every mirror: tie-break keeps the primary
+        assert mock_verify.call_args.kwargs["mirror"] == "ubuntu"
+
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_exit_nonzero_on_mismatch(self, mock_fetch, mock_verify, runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MISMATCH", "expected=aa got=bb")]
+        result = runner.invoke(cli, ["--glibc-dir", str(populated_glibc_dir), "verify"])
+        assert result.exit_code == 1
+
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_exit_nonzero_on_missing(self, mock_fetch, mock_verify, runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MISSING", "")]
+        result = runner.invoke(cli, ["--glibc-dir", str(populated_glibc_dir), "verify"])
+        assert result.exit_code == 1
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_fix_success_exits_zero(self, mock_fetch, mock_verify, mock_dl,
+                                    runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MISSING", "")]
+        result = runner.invoke(cli, ["--glibc-dir", str(populated_glibc_dir), "verify", "--fix"])
+        assert result.exit_code == 0
+        assert mock_dl.called
+
+    @patch("pwnlibc.cli.download_glibc", side_effect=RuntimeError("boom"))
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_fix_failure_exits_nonzero(self, mock_fetch, mock_verify, mock_dl,
+                                       runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MISSING", "")]
+        result = runner.invoke(cli, ["--glibc-dir", str(populated_glibc_dir), "verify", "--fix"])
+        assert result.exit_code == 1
+
+
+class TestDownloadSourcePassthrough:
+    """The source URL is resolved once by the caller and passed through."""
+
+    URL = "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
+
+    @patch("pwnlibc.cli.download_source")
+    @patch("pwnlibc.builder.check_source_available")
+    def test_source_download_passes_url(self, mock_check, mock_dl_source, runner, tmp_path):
+        mock_check.return_value = self.URL
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir), "source", "download", "2.31",
+        ])
+        assert result.exit_code == 0
+        mock_check.assert_called_once_with("2.31")
+        mock_dl_source.assert_called_once()
+        assert mock_dl_source.call_args.kwargs["url"] == self.URL
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli.download_source")
+    @patch("pwnlibc.builder.check_source_available")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_download_command_source_step_single_check(
+            self, mock_fetch, mock_check, mock_dl_source, mock_dl_glibc, runner, tmp_path):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_check.return_value = self.URL
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "2.31", "--arch", "amd64", "--no-dbg", "--source",
+        ])
+        assert result.exit_code == 0
+        mock_check.assert_called_once_with("2.31")  # no second HEAD round-trip
+        mock_dl_source.assert_called_once()
+        assert mock_dl_source.call_args.kwargs["url"] == self.URL
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli.download_source")
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_download_command_source_unavailable(
+            self, mock_fetch, mock_check, mock_dl_source, mock_dl_glibc, runner, tmp_path):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "2.31", "--arch", "amd64", "--no-dbg", "--source",
+        ])
+        assert result.exit_code == 0
+        mock_dl_source.assert_not_called()
+        assert "not available on ftp.gnu.org" in result.output

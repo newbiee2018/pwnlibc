@@ -171,6 +171,96 @@ class TestGetDebugBuildPath:
         assert result is not None
         assert "glibc-2.31" in result
 
+    def test_extracts_from_hash_named_debug_file(self, tmp_path):
+        """deb(dbg): debug file is hash-named, resolved via libc's debuglink."""
+        from pwnlibc.glibc import GlibcInstall, get_debug_build_path
+        from tests.conftest import _build_debuglink_elf
+
+        hash_name = "92732f783158c66fb4f3756458ca24e46e827d.debug"
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+
+        # libc carries .gnu_debuglink -> hash file, but NO build path itself
+        libc_path = _build_debuglink_elf(lib_dir / "libc-2.31.so", hash_name)
+        build_path = b"/build/glibc-9c2eff/glibc-2.31/"
+        (debug_dir / hash_name).write_bytes(
+            b"\x7fELF" + b"\x00" * 100 + build_path + b"\x00" * 100
+        )
+
+        glibc = GlibcInstall(
+            version="2.31", arch="amd64",
+            base_dir=tmp_path, lib_dir=lib_dir,
+            libc_path=libc_path,
+            ld_path=lib_dir / "ld-2.31.so",
+            has_source=False, has_debug=True,
+            new_naming=False, variant="deb",
+        )
+
+        result = get_debug_build_path(glibc)
+        assert result is not None
+        assert "glibc-9c2eff" in result
+        assert result.endswith("glibc-2.31")
+
+    def test_hash_debug_file_resolved_via_elfutil(self, tmp_path, monkeypatch):
+        """get_debug_build_path consults elfutil.get_debuglink for the name."""
+        import pwnlibc.glibc as glibc_mod
+        from pwnlibc.glibc import GlibcInstall, get_debug_build_path
+
+        hash_name = "deadbeef.debug"
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+
+        libc_path = lib_dir / "libc.so.6"
+        libc_path.write_bytes(b"\x7fELF" + b"\x00" * 200)
+        (debug_dir / hash_name).write_bytes(
+            b"\x7fELF" + b"\x00" * 50 + b"/build/glibc-Zz9/glibc-2.35/" + b"\x00" * 50
+        )
+
+        monkeypatch.setattr(glibc_mod, "get_debuglink", lambda p: hash_name)
+        glibc = GlibcInstall(
+            version="2.35", arch="amd64",
+            base_dir=tmp_path, lib_dir=lib_dir,
+            libc_path=libc_path,
+            ld_path=lib_dir / "ld-linux-x86-64.so.2",
+            has_source=False, has_debug=True,
+            new_naming=True, variant="deb",
+        )
+
+        assert get_debug_build_path(glibc) == "/build/glibc-Zz9/glibc-2.35"
+
+    def test_empty_debug_file_falls_through_to_libc(self, tmp_path):
+        """Zero-length debug file must not crash mmap scanning."""
+        from pwnlibc.glibc import GlibcInstall, get_debug_build_path
+        from tests.conftest import _build_debuglink_elf
+
+        hash_name = "cafebabe.debug"
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+
+        libc_path = _build_debuglink_elf(lib_dir / "libc-2.31.so", hash_name)
+        (debug_dir / hash_name).write_bytes(b"")
+        build_path = b"/build/glibc-Qq1/glibc-2.31/"
+        # libc content also holds a build path past the ELF header area
+        data = bytearray(libc_path.read_bytes())
+        data += b"\x00" * 16 + build_path
+        libc_path.write_bytes(bytes(data))
+
+        glibc = GlibcInstall(
+            version="2.31", arch="amd64",
+            base_dir=tmp_path, lib_dir=lib_dir,
+            libc_path=libc_path,
+            ld_path=lib_dir / "ld-2.31.so",
+            has_source=False, has_debug=True,
+            new_naming=False, variant="deb",
+        )
+
+        result = get_debug_build_path(glibc)
+        assert result is not None
+        assert "glibc-Qq1" in result
+
 
 class TestGdbDebugSymbols:
     """Verify GDB can load debug symbols for patched binaries."""

@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from tests.conftest import build_test_binary
+from tests.conftest import _build_debuglink_elf, build_test_binary
 
 
 def has_patchelf():
@@ -167,6 +167,220 @@ class TestPatchInplace:
             capture_output=True, text=True,
         )
         assert str(inst.lib_dir) in result.stdout
+
+
+class TestCopyDebugFiles:
+    """_copy_debug_files must find hash-named deb(dbg) debug files."""
+
+    HASH = "92732f783158c66fb4f3756458ca24e46e827d.debug"
+
+    @staticmethod
+    def _make_install(lib_dir):
+        from pwnlibc.glibc import GlibcInstall
+
+        return GlibcInstall(
+            version="2.31", arch="amd64",
+            base_dir=lib_dir.parent, lib_dir=lib_dir,
+            libc_path=lib_dir / "libc-2.31.so",
+            ld_path=lib_dir / "ld-2.31.so",
+            has_source=False, has_debug=True,
+            new_naming=False, variant="deb",
+        )
+
+    def test_hash_named_debug_via_debuglink(self, tmp_path):
+        """Lib's .gnu_debuglink names the hash file; hash name is preserved."""
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+        lib = _build_debuglink_elf(lib_dir / "libc-2.31.so", self.HASH)
+        (debug_dir / self.HASH).write_bytes(b"debug-data")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+
+        assert count == 1
+        # Hash name kept: GDB resolves <binary-dir>/.debug/<debuglink-name>
+        assert (target / ".debug" / self.HASH).read_bytes() == b"debug-data"
+        assert not (target / ".debug" / "libc-2.31.so").exists()
+
+    def test_hash_file_missing_falls_through(self, tmp_path):
+        """Debuglink present but file absent; legacy name still wins."""
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+        lib = _build_debuglink_elf(lib_dir / "libc-2.31.so", self.HASH)
+        (debug_dir / "libc-2.31.so").write_bytes(b"legacy-data")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+
+        assert count == 1
+        assert (target / ".debug" / "libc-2.31.so").read_bytes() == b"legacy-data"
+
+    def test_legacy_named_debug_file(self, tmp_path):
+        """No debuglink: exact-name debug file is copied as-is."""
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+        lib = lib_dir / "ld-2.31.so"
+        lib.write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (debug_dir / "ld-2.31.so").write_bytes(b"ld-debug")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+
+        assert count == 1
+        assert (target / ".debug" / "ld-2.31.so").read_bytes() == b"ld-debug"
+
+    def test_prefix_fallback_requires_trailing_dash(self, tmp_path):
+        """libm- must not grab libmvec-; libc- must not grab libcrypt-."""
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+
+        libm = lib_dir / "libm-2.31.so"
+        libm.write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (debug_dir / "libm-2.31.so.debug").write_bytes(b"m-debug")
+        (debug_dir / "libmvec-2.31.so.debug").write_bytes(b"mvec-debug")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        count = _copy_debug_files(self._make_install(lib_dir), [libm], target)
+
+        assert count == 1
+        assert (target / ".debug" / "libm-2.31.so.debug").read_bytes() == b"m-debug"
+        assert not (target / ".debug" / "libmvec-2.31.so.debug").exists()
+
+    def test_prefix_fallback_ignores_longer_libc_like_names(self, tmp_path):
+        """libcidn-/libcrypt- files must not satisfy a libc- lookup."""
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+
+        lib = lib_dir / "libc-2.31.so"
+        lib.write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (debug_dir / "libcrypt-2.31.so.debug").write_bytes(b"crypt")
+        (debug_dir / "libcidn-2.31.so.debug").write_bytes(b"cidn")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+
+        assert count == 0
+        assert not (target / ".debug" / "libcrypt-2.31.so.debug").exists()
+        assert not (target / ".debug" / "libcidn-2.31.so.debug").exists()
+
+    def test_no_debug_dir_returns_zero(self, tmp_path):
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir(parents=True)
+        lib = lib_dir / "libc-2.31.so"
+        lib.write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+        target = tmp_path / "target"
+        target.mkdir()
+        assert _copy_debug_files(self._make_install(lib_dir), [lib], target) == 0
+
+    def test_only_hash_files_without_debuglink_matches_nothing(self, tmp_path):
+        """Old buggy behavior sanity: bare lib without debuglink + hash-only
+        .debug dir copies nothing (both legacy lookups miss)."""
+        from pwnlibc.patcher import _copy_debug_files
+
+        lib_dir = tmp_path / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+        lib = lib_dir / "libc-2.31.so"
+        lib.write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (debug_dir / self.HASH).write_bytes(b"orphan")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        assert _copy_debug_files(self._make_install(lib_dir), [lib], target) == 0
+
+
+class TestFindLibrary:
+    """find_library fallback must not confuse similarly-prefixed libs."""
+
+    @staticmethod
+    def _make_install(lib_dir):
+        from pwnlibc.glibc import GlibcInstall
+
+        return GlibcInstall(
+            version="2.31", arch="amd64",
+            base_dir=lib_dir.parent, lib_dir=lib_dir,
+            libc_path=lib_dir / "libc-2.31.so",
+            ld_path=lib_dir / "ld-2.31.so",
+            has_source=False, has_debug=False,
+            new_naming=False, variant="deb",
+        )
+
+    def test_direct_soname_hit(self, tmp_path):
+        from pwnlibc.glibc import find_library
+
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "libpthread.so.0").write_bytes(b"\x7fELF" + b"\x00" * 10)
+        inst = self._make_install(lib_dir)
+
+        assert find_library(inst, "libpthread.so.0") is not None
+
+    def test_prefix_fallback_picks_shortest_name(self, tmp_path):
+        from pwnlibc.glibc import find_library
+
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "libm-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 10)
+        (lib_dir / "libmvec-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 10)
+        (lib_dir / "libmemusage.so").write_bytes(b"\x7fELF" + b"\x00" * 10)
+        inst = self._make_install(lib_dir)
+
+        assert find_library(inst, "libm.so.6") == lib_dir / "libm-2.31.so"
+
+    def test_prefix_fallback_deterministic_across_orders(self, tmp_path, monkeypatch):
+        """Result must not depend on iterdir() order for equal-length names."""
+        import itertools
+        from pwnlibc.glibc import find_library
+
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir(parents=True)
+        names = ["libm-2.31a.so", "libm-2.31b.so"]
+        for n in names:
+            (lib_dir / n).write_bytes(b"\x7fELF" + b"\x00" * 10)
+        inst = self._make_install(lib_dir)
+
+        real_iterdir = type(lib_dir).iterdir
+        for perm in itertools.permutations(names):
+            monkeypatch.setattr(
+                type(lib_dir), "iterdir",
+                lambda self, _p=perm: iter([self / n for n in _p]),
+            )
+            assert find_library(inst, "libm.so.6").name == "libm-2.31a.so"
+        monkeypatch.setattr(type(lib_dir), "iterdir", real_iterdir)
+
+    def test_no_match_returns_none(self, tmp_path):
+        from pwnlibc.glibc import find_library
+
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "libmvec-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 10)
+        inst = self._make_install(lib_dir)
+
+        # libm- prefix never matches libmvec
+        assert find_library(inst, "libm.so.6") is None
 
 
 class TestPatchAndRun:

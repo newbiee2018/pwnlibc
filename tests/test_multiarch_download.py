@@ -359,13 +359,15 @@ class TestDownloadAll:
 class TestDownloadWithSource:
     """Downloading with --source flag fetches GNU source tarball."""
 
+    @patch("pwnlibc.builder.check_source_available")
     @patch("pwnlibc.cli.download_source")
     @patch("pwnlibc.downloader._fetch_index")
     @patch("pwnlibc.downloader._download_file")
     @patch("pwnlibc.downloader._extract_deb")
-    def test_download_with_source_flag(self, mock_extract, mock_dl,
-                                        mock_fetch, mock_source, runner, tmp_path):
+    def test_download_with_source_flag(self, mock_extract, mock_dl, mock_fetch,
+                                       mock_source, mock_check, runner, tmp_path):
         mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_check.return_value = "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
         glibc_dir = tmp_path / "glibc"
         glibc_dir.mkdir()
         cache = glibc_dir / ".cache"
@@ -381,14 +383,16 @@ class TestDownloadWithSource:
         call_args = mock_source.call_args
         assert call_args[0][0] == "2.31"  # version
 
+    @patch("pwnlibc.builder.check_source_available")
     @patch("pwnlibc.cli.download_source")
     @patch("pwnlibc.downloader._fetch_index")
     @patch("pwnlibc.downloader._download_file")
     @patch("pwnlibc.downloader._extract_deb")
-    def test_download_multiple_with_source(self, mock_extract, mock_dl,
-                                            mock_fetch, mock_source, runner, tmp_path):
+    def test_download_multiple_with_source(self, mock_extract, mock_dl, mock_fetch,
+                                           mock_source, mock_check, runner, tmp_path):
         """Source is downloaded for each version when --source used with multi-version."""
         mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_check.return_value = "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
         glibc_dir = tmp_path / "glibc"
         glibc_dir.mkdir()
         cache = glibc_dir / ".cache"
