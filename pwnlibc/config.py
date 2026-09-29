@@ -115,13 +115,16 @@ for _arch, (_gcc, _triplet) in _CROSS_DEFAULTS.items():
 ALL_ARCHES = list(ARCH_INFO.keys())
 X86_ARCHES = ["amd64", "i686"]
 
+# All mirrors serve identical pool content over TLS with valid certificates
+# (and plain http is NOT redirected), so https is used throughout.
 MIRRORS = {
-    "ubuntu": "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/",
-    "old-ubuntu": "http://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc/",
+    "ubuntu": "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/",
+    "old-ubuntu": "https://old-releases.ubuntu.com/ubuntu/pool/main/g/glibc/",
     "tsinghua": "https://mirror.tuna.tsinghua.edu.cn/ubuntu/pool/main/g/glibc/",
-    "ports": "http://ports.ubuntu.com/pool/main/g/glibc/",
-    "debian": "http://deb.debian.org/debian/pool/main/g/glibc/",
-    "old-debian": "http://archive.debian.org/debian/pool/main/g/glibc/",
+    # NB: ports.ubuntu.com serves its pool WITHOUT the /ubuntu prefix
+    "ports": "https://ports.ubuntu.com/pool/main/g/glibc/",
+    "debian": "https://deb.debian.org/debian/pool/main/g/glibc/",
+    "old-debian": "https://archive.debian.org/debian/pool/main/g/glibc/",
 }
 
 GNU_SOURCE_BASE = "https://ftp.gnu.org/gnu/glibc/"

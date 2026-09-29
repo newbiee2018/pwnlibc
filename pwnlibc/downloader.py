@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
+import lzma
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -25,6 +28,28 @@ DBG_PATTERN = re.compile(
 
 _DEB_TO_PWNLIBC = {info["deb_arch"]: name for name, info in ARCH_INFO.items()}
 
+# glibc version -> Ubuntu/Debian suite whose Packages index pins it.
+# Versions/suites not listed here simply skip hash verification.
+_UBUNTU_SUITES = {
+    "2.19": "trusty", "2.23": "xenial", "2.27": "bionic", "2.31": "focal",
+    "2.35": "jammy", "2.37": "lunar", "2.38": "mantic", "2.39": "noble",
+    "2.40": "oracular", "2.41": "plucky",
+}
+_DEBIAN_SUITES = {
+    "2.24": "stretch", "2.28": "buster", "2.31": "bullseye",
+    "2.36": "bookworm", "2.41": "trixie",
+}
+
+# mirror key -> package origin, which decides the suite table above.
+# Mirrors not listed here skip hash verification entirely.
+_MIRROR_ORIGIN = {
+    "ubuntu": "ubuntu", "tsinghua": "ubuntu", "old-ubuntu": "ubuntu",
+    "ports": "ubuntu", "debian": "debian", "old-debian": "debian",
+}
+
+# Cached dists indices (and miss markers) older than this are refreshed.
+_INDEX_TTL_SECONDS = 7 * 86464
+
 
 @dataclass
 class DebPackage:
@@ -36,10 +61,38 @@ class DebPackage:
     mirror: str = "ubuntu"
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """Whether an exception looks like a temporary network condition worth
+    retrying: connection/SSL/timeout errors and 5xx HTTP errors. 4xx errors
+    (404 etc.) are permanent and must fail immediately."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    return isinstance(exc, (urllib.error.URLError, ConnectionError, TimeoutError, OSError))
+
+
+def _retry_transient(fn, attempts: int = 3, delay: float = 1.5):
+    """Run fn(), retrying transient network failures with linear backoff.
+    Permanent errors and non-network exceptions propagate immediately."""
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == attempts - 1 or not _is_transient(exc):
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
+def _fetch_bytes(url: str) -> bytes:
+    def attempt() -> bytes:
+        req = urllib.request.Request(url, headers={"User-Agent": "pwnlibc/0.1"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+
+    return _retry_transient(attempt)
+
+
 def _fetch_index(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "pwnlibc/0.1"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    return _fetch_bytes(url).decode("utf-8", errors="replace")
 
 
 def scrape_available(mirror: str = "ubuntu") -> list[DebPackage]:
@@ -80,9 +133,11 @@ def scrape_available(mirror: str = "ubuntu") -> list[DebPackage]:
 def _download_file(url: str, dest: Path, progress_cb=None):
     # Download to a .part file and rename on success: a Ctrl-C mid-download
     # must not leave a truncated file that callers would treat as complete.
-    req = urllib.request.Request(url, headers={"User-Agent": "pwnlibc/0.1"})
+    # Transient network errors are retried; each attempt restarts the .part.
     part = dest.with_name(dest.name + ".part")
-    try:
+
+    def attempt():
+        req = urllib.request.Request(url, headers={"User-Agent": "pwnlibc/0.1"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
@@ -95,6 +150,9 @@ def _download_file(url: str, dest: Path, progress_cb=None):
                     downloaded += len(chunk)
                     if progress_cb:
                         progress_cb(downloaded, total)
+
+    try:
+        _retry_transient(attempt)
         os.replace(part, dest)
     except BaseException:
         try:
@@ -216,6 +274,7 @@ def download_glibc(
     deb_path = cache_dir / pkg.filename
     if not deb_path.exists():
         _download_file(deb_url, deb_path, progress_cb)
+    _verify_deb(pkg.filename, pkg, cache_dir, "libc6")
 
     _extract_deb(deb_path, out_dir, pkg.arch)
 
@@ -224,6 +283,7 @@ def download_glibc(
         dbg_path = cache_dir / pkg.dbg_filename
         if not dbg_path.exists():
             _download_file(dbg_url, dbg_path, progress_cb)
+        _verify_deb(pkg.dbg_filename, pkg, cache_dir, "libc6-dbg")
         _extract_dbg_deb(dbg_path, out_dir, pkg.arch)
 
     return out_dir.parent
@@ -265,6 +325,195 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _candidate_suites(pkg: DebPackage) -> list[str]:
+    """Dists suites whose Packages index may pin this package, in try order.
+
+    Only each suite's CURRENT revision is indexed (e.g. 2.31-0ubuntu9.18
+    lives in focal-updates, 2.31-0ubuntu9 in focal), so all pockets of the
+    release are tried. An empty result means the file is not verifiable
+    (unknown version or mirror) and verification is skipped.
+    """
+    origin = _MIRROR_ORIGIN.get(pkg.mirror)
+    if origin == "ubuntu":
+        suite = _UBUNTU_SUITES.get(pkg.version)
+        if suite is not None:
+            return [f"{suite}-updates", f"{suite}-security", suite]
+    elif origin == "debian":
+        suite = _DEBIAN_SUITES.get(pkg.version)
+        if suite is not None:
+            return [f"{suite}-updates", suite]
+    return []
+
+
+def _index_urls(mirror: str, suite: str, deb_arch: str) -> list[str]:
+    """Packages index URLs for one suite: .xz first, .gz fallback.
+
+    The dists tree hangs off the same host as the pool; the base is forced
+    to https so hash metadata is never fetched over plain http even while
+    MIRRORS entries are http.
+    """
+    pool_url = MIRRORS[mirror]
+    if "/pool/" in pool_url:
+        base = pool_url.split("/pool/")[0]
+    else:
+        base = pool_url.rstrip("/")
+    if base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
+    path = f"/dists/{suite}/main/binary-{deb_arch}/Packages"
+    return [base + path + ".xz", base + path + ".gz"]
+
+
+def _decompress_index(raw: bytes) -> bytes:
+    # Sniff the magic bytes rather than trusting the filename, so a
+    # mislabeled cache entry still decompresses.
+    if raw[:2] == b"\x1f\x8b":
+        return gzip.decompress(raw)
+    return lzma.decompress(raw)
+
+
+def _parse_packages_sha256(raw: bytes, deb_filename: str) -> str | None:
+    """SHA256 of deb_filename from raw (compressed) Packages index bytes.
+
+    Returns None when the index does not list the file; raises on corrupt
+    compressed data so callers can drop the bad cache entry.
+    """
+    text = _decompress_index(raw).replace(b"\r\n", b"\n")
+    want = b"/" + deb_filename.encode("utf-8")
+    for stanza in text.split(b"\n\n"):
+        filename = None
+        sha256 = None
+        for line in stanza.split(b"\n"):
+            if line.startswith(b"Filename:"):
+                filename = line[len(b"Filename:"):].strip()
+            elif line.startswith(b"SHA256:"):
+                sha256 = line[len(b"SHA256:"):].strip()
+        if filename is not None and filename.endswith(want):
+            if sha256 is not None and len(sha256) == 64:
+                return sha256.decode("ascii", errors="replace").lower()
+            return None
+    return None
+
+
+def _cache_fresh(path: Path) -> bool:
+    try:
+        return time.time() - path.stat().st_mtime <= _INDEX_TTL_SECONDS
+    except OSError:
+        return False
+
+
+def _miss_marker_matches(marker: Path, deb_filename: str) -> bool:
+    try:
+        return deb_filename in marker.read_text("ascii").split()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _write_miss_marker(index_dir: Path, deb_filename: str) -> None:
+    # One filename per line, so libc6 and libc6-dbg misses coexist.
+    try:
+        index_dir.mkdir(parents=True, exist_ok=True)
+        marker = index_dir / "Packages.miss"
+        try:
+            known = marker.read_text("ascii").split()
+        except OSError:
+            known = []
+        if deb_filename not in known:
+            marker.write_text("\n".join(known + [deb_filename]) + "\n", "ascii")
+    except OSError:
+        pass
+
+
+def _suite_lookup(index_dir: Path, mirror: str, suite: str,
+                  deb_arch: str, deb_filename: str) -> str | None:
+    """Search one suite's Packages index (cache-first) for deb_filename."""
+    for url in _index_urls(mirror, suite, deb_arch):
+        cached = index_dir / url.rsplit("/", 1)[-1]
+        if cached.exists() and _cache_fresh(cached):
+            try:
+                # A valid index settles the suite either way; the .gz twin
+                # holds the same stanzas, so don't fall through to it.
+                return _parse_packages_sha256(cached.read_bytes(), deb_filename)
+            except (OSError, EOFError, lzma.LZMAError):
+                try:  # corrupt cache entry: drop it and refetch below
+                    cached.unlink()
+                except OSError:
+                    pass
+        try:
+            raw = _fetch_bytes(url)
+        except Exception:
+            continue
+        try:
+            index_dir.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(raw)
+        except OSError:
+            pass  # cache write failure is non-fatal
+        try:
+            return _parse_packages_sha256(raw, deb_filename)
+        except (OSError, EOFError, lzma.LZMAError):
+            continue
+    return None
+
+
+def _expected_sha256(pkg: DebPackage, deb_filename: str,
+                     cache_dir: Path) -> str | None:
+    """Core lookup: expected SHA256 for one pool filename, or None when no
+    index lists it (EOL leftovers, superseded revisions)."""
+    suites = _candidate_suites(pkg)
+    if not suites:
+        return None
+    deb_arch = ARCH_INFO.get(pkg.arch, {}).get("deb_arch")
+    if deb_arch is None:
+        return None
+
+    for suite in suites:
+        index_dir = cache_dir / "indices" / pkg.mirror / suite / deb_arch
+        marker = index_dir / "Packages.miss"
+        if _cache_fresh(marker) and _miss_marker_matches(marker, deb_filename):
+            continue  # already known: this suite does not list the file
+        sha256 = _suite_lookup(index_dir, pkg.mirror, suite, deb_arch,
+                               deb_filename)
+        if sha256 is not None:
+            return sha256
+
+    # Nothing lists the file. Negative-cache per suite so repeated downloads
+    # don't refetch multi-megabyte indices for permanently unverifiable
+    # files (e.g. trusty leftovers that no dists index ever referenced).
+    for suite in suites:
+        _write_miss_marker(
+            cache_dir / "indices" / pkg.mirror / suite / deb_arch, deb_filename)
+    return None
+
+
+def deb_sha256_expected(pkg: DebPackage, cache_dir: Path) -> str | None:
+    """Expected SHA256 from the owning suite's Packages index, or None when
+    no index lists the file (EOL leftovers, superseded revisions)."""
+    return _expected_sha256(pkg, pkg.filename, cache_dir)
+
+
+def _verify_deb(pkg_filename: str, pkg: DebPackage, cache_dir: Path,
+                label: str) -> None:
+    """Verify a cached .deb against the SHA256 pinned in the dists index.
+
+    Unverifiable files (no index lists them — EOL leftovers, superseded
+    revisions) are skipped by design. A mismatch deletes the file and
+    raises so callers surface it instead of extracting tampered bytes.
+    """
+    expected = _expected_sha256(pkg, pkg_filename, cache_dir)
+    if expected is None:
+        return
+    path = cache_dir / pkg_filename
+    actual = sha256_file(path)
+    if actual != expected:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"SHA256 mismatch for {label} {pkg_filename}: "
+            f"expected {expected[:16]}… got {actual[:16]}…"
+        )
+
+
 def verify_against_deb(
     pkg: DebPackage,
     glibc_dir: Path,
@@ -282,6 +531,7 @@ def verify_against_deb(
     deb_path = cache_dir / pkg.filename
     if not deb_path.exists():
         _download_file(mirror_url + pkg.filename, deb_path)
+    _verify_deb(pkg.filename, pkg, cache_dir, "libc6")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ref_dir = Path(tmpdir) / "ref"

@@ -1,12 +1,14 @@
 """Tests for pwnlibc.patcher — ELF patching via patchelf."""
 
+import json
 import os
 import shutil
 import subprocess
+from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import _build_debuglink_elf, build_test_binary
+from tests.conftest import _build_debuglink_elf, _build_minimal_elf, build_test_binary
 
 
 def has_patchelf():
@@ -57,7 +59,7 @@ class TestPatchCopy:
     @needs_tools
     def test_copy_mode_creates_files(self, tmp_path, populated_glibc_dir):
         from pwnlibc.glibc import resolve_lib_paths
-        from pwnlibc.patcher import PATCHED_SUFFIX, patch_copy
+        from pwnlibc.patcher import PATCHED_MANIFEST_SUFFIX, PATCHED_SUFFIX, patch_copy
 
         binary = build_test_binary(tmp_path / "workdir")
         if binary is None:
@@ -74,6 +76,13 @@ class TestPatchCopy:
         assert len(copied) >= 2
         assert (binary.parent / "libc-2.31.so").exists()
         assert (binary.parent / "ld-2.31.so").exists()
+
+        # Manifest is keyed on the original binary name and lists the copies
+        manifest_path = binary.parent / (binary.name + PATCHED_MANIFEST_SUFFIX)
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text())
+        assert "libc-2.31.so" in manifest["files"]
+        assert "ld-2.31.so" in manifest["files"]
 
     @needs_tools
     def test_copy_mode_sets_interpreter(self, tmp_path, populated_glibc_dir):
@@ -129,6 +138,117 @@ class TestPatchCopy:
         )
         # RPATH should not be "." since we passed set_rpath=False
         assert result.stdout.strip() != "."
+
+
+class TestPatchCopyManifest:
+    """patch_copy records every file it creates in a JSON manifest next to the
+    binary (keyed on the ORIGINAL binary name) so restore can remove exactly
+    those files. patchelf is mocked — no real tools needed."""
+
+    HASH = "92732f783158c66fb4f3756458ca24e46e827d.debug"
+
+    @staticmethod
+    def _make_install(lib_dir):
+        from pwnlibc.glibc import GlibcInstall
+
+        return GlibcInstall(
+            version="2.31", arch="amd64",
+            base_dir=lib_dir.parent, lib_dir=lib_dir,
+            libc_path=lib_dir / "libc-2.31.so",
+            ld_path=lib_dir / "ld-2.31.so",
+            has_source=False, has_debug=True,
+            new_naming=False, variant="deb",
+        )
+
+    def _make_fixture(self, tmp_path):
+        """Fake install: libc resolves its debug file via the .gnu_debuglink
+        hash name, ld via the exact-name fallback."""
+        lib_dir = tmp_path / "glibc" / "2.31" / "amd64" / "lib"
+        debug_dir = lib_dir / ".debug"
+        debug_dir.mkdir(parents=True)
+        _build_debuglink_elf(lib_dir / "libc-2.31.so", self.HASH)
+        (debug_dir / self.HASH).write_bytes(b"libc-debug-data")
+        (lib_dir / "ld-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 100)
+        (debug_dir / "ld-2.31.so").write_bytes(b"ld-debug-data")
+        return self._make_install(lib_dir)
+
+    @patch("pwnlibc.patcher._run_patchelf")
+    @patch("pwnlibc.patcher.shutil.which", return_value="/usr/bin/patchelf")
+    def test_manifest_lists_libs_and_debug_files(self, mock_which, mock_patchelf, tmp_path):
+        from pwnlibc.patcher import PATCHED_MANIFEST_SUFFIX, patch_copy
+
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        binary = _build_minimal_elf(workdir / "testbin", needed=["libc.so.6"])
+
+        inst = self._make_fixture(tmp_path)
+        patched, _ = patch_copy(binary, inst)
+
+        assert patched.exists()
+        manifest_path = binary.parent / (binary.name + PATCHED_MANIFEST_SUFFIX)
+        assert manifest_path.exists()
+        expected = ["libc-2.31.so", "ld-2.31.so", f".debug/{self.HASH}", ".debug/ld-2.31.so"]
+        assert manifest_path.read_text() == json.dumps({"files": expected}, indent=1) + "\n"
+
+    @patch("pwnlibc.patcher._run_patchelf")
+    @patch("pwnlibc.patcher.shutil.which", return_value="/usr/bin/patchelf")
+    def test_repatch_overwrites_manifest(self, mock_which, mock_patchelf, tmp_path):
+        """Re-patching replaces the manifest wholesale — stale entries disappear."""
+        from pwnlibc.patcher import PATCHED_MANIFEST_SUFFIX, patch_copy
+
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        binary = _build_minimal_elf(workdir / "testbin", needed=["libc.so.6"])
+        inst = self._make_fixture(tmp_path)
+
+        patch_copy(binary, inst)
+        manifest_path = binary.parent / (binary.name + PATCHED_MANIFEST_SUFFIX)
+        assert f".debug/{self.HASH}" in json.loads(manifest_path.read_text())["files"]
+
+        # Simulate drift: a stale manifest and a debug pack that went away
+        manifest_path.write_text(json.dumps(
+            {"files": ["libc-9.99.so", f".debug/{self.HASH}"]}, indent=1) + "\n")
+        shutil.rmtree(inst.lib_dir / ".debug")
+
+        patch_copy(binary, inst)
+        expected = ["libc-2.31.so", "ld-2.31.so"]
+        assert manifest_path.read_text() == json.dumps({"files": expected}, indent=1) + "\n"
+
+    @patch("pwnlibc.patcher._run_patchelf", side_effect=RuntimeError("patchelf failed"))
+    @patch("pwnlibc.patcher.shutil.which", return_value="/usr/bin/patchelf")
+    def test_manifest_written_before_patchelf_runs(self, mock_which, mock_patchelf, tmp_path):
+        """A mid-patch patchelf failure still leaves a consumable manifest."""
+        from pwnlibc.patcher import PATCHED_MANIFEST_SUFFIX, patch_copy
+
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        binary = _build_minimal_elf(workdir / "testbin", needed=["libc.so.6"])
+        inst = self._make_fixture(tmp_path)
+
+        with pytest.raises(RuntimeError, match="patchelf failed"):
+            patch_copy(binary, inst)
+
+        manifest_path = binary.parent / (binary.name + PATCHED_MANIFEST_SUFFIX)
+        assert manifest_path.exists()
+        assert "libc-2.31.so" in json.loads(manifest_path.read_text())["files"]
+
+    @patch("pwnlibc.patcher._run_patchelf")
+    @patch("pwnlibc.patcher.shutil.which", return_value="/usr/bin/patchelf")
+    def test_patch_inplace_writes_no_manifest(self, mock_which, mock_patchelf, tmp_path):
+        """inplace mode creates no files besides the .patched copy, so it
+        writes no manifest."""
+        from pwnlibc.patcher import PATCHED_MANIFEST_SUFFIX, PATCHED_SUFFIX, patch_inplace
+
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        binary = _build_minimal_elf(workdir / "testbin", needed=["libc.so.6"])
+        inst = self._make_fixture(tmp_path)
+
+        patched = patch_inplace(binary, inst)
+
+        assert patched == binary.parent / (binary.name + PATCHED_SUFFIX)
+        assert patched.exists()
+        assert not (binary.parent / (binary.name + PATCHED_MANIFEST_SUFFIX)).exists()
 
 
 class TestPatchInplace:
@@ -199,9 +319,9 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+        copied = _copy_debug_files(self._make_install(lib_dir), [lib], target)
 
-        assert count == 1
+        assert copied == [f".debug/{self.HASH}"]
         # Hash name kept: GDB resolves <binary-dir>/.debug/<debuglink-name>
         assert (target / ".debug" / self.HASH).read_bytes() == b"debug-data"
         assert not (target / ".debug" / "libc-2.31.so").exists()
@@ -218,9 +338,9 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+        copied = _copy_debug_files(self._make_install(lib_dir), [lib], target)
 
-        assert count == 1
+        assert copied == [".debug/libc-2.31.so"]
         assert (target / ".debug" / "libc-2.31.so").read_bytes() == b"legacy-data"
 
     def test_legacy_named_debug_file(self, tmp_path):
@@ -236,9 +356,9 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+        copied = _copy_debug_files(self._make_install(lib_dir), [lib], target)
 
-        assert count == 1
+        assert copied == [".debug/ld-2.31.so"]
         assert (target / ".debug" / "ld-2.31.so").read_bytes() == b"ld-debug"
 
     def test_prefix_fallback_requires_trailing_dash(self, tmp_path):
@@ -256,9 +376,9 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        count = _copy_debug_files(self._make_install(lib_dir), [libm], target)
+        copied = _copy_debug_files(self._make_install(lib_dir), [libm], target)
 
-        assert count == 1
+        assert copied == [".debug/libm-2.31.so.debug"]
         assert (target / ".debug" / "libm-2.31.so.debug").read_bytes() == b"m-debug"
         assert not (target / ".debug" / "libmvec-2.31.so.debug").exists()
 
@@ -277,13 +397,13 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        count = _copy_debug_files(self._make_install(lib_dir), [lib], target)
+        copied = _copy_debug_files(self._make_install(lib_dir), [lib], target)
 
-        assert count == 0
+        assert copied == []
         assert not (target / ".debug" / "libcrypt-2.31.so.debug").exists()
         assert not (target / ".debug" / "libcidn-2.31.so.debug").exists()
 
-    def test_no_debug_dir_returns_zero(self, tmp_path):
+    def test_no_debug_dir_returns_empty(self, tmp_path):
         from pwnlibc.patcher import _copy_debug_files
 
         lib_dir = tmp_path / "lib"
@@ -293,7 +413,7 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        assert _copy_debug_files(self._make_install(lib_dir), [lib], target) == 0
+        assert _copy_debug_files(self._make_install(lib_dir), [lib], target) == []
 
     def test_only_hash_files_without_debuglink_matches_nothing(self, tmp_path):
         """Old buggy behavior sanity: bare lib without debuglink + hash-only
@@ -309,7 +429,7 @@ class TestCopyDebugFiles:
 
         target = tmp_path / "target"
         target.mkdir()
-        assert _copy_debug_files(self._make_install(lib_dir), [lib], target) == 0
+        assert _copy_debug_files(self._make_install(lib_dir), [lib], target) == []
 
 
 class TestFindLibrary:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -97,17 +98,34 @@ def _scrape_mirrors(mirrors: set[str]) -> list[DebPackage]:
 def _deb_version_key(ver: str) -> tuple:
     """dpkg-style ordering for Ubuntu glibc revisions like 2.31-0ubuntu9.16.
 
-    Digit runs compare numerically; '~' sorts before everything (so ESM
-    revisions like 3.1~esm1 sort below the final 3.1); end-of-string sorts
-    above '~' but below letters. Covers the character set that actually
-    appears in Ubuntu pool revisions (digits, letters, '.', '+', '-', '~').
+    Digit runs compare numerically. Inside non-digit runs, characters are
+    mapped per dpkg's ordering classes: '~' sorts before everything (so ESM
+    revisions like 3.1~esm1 sort below the final 3.1); letters sort above
+    '~' and below all other characters — real dpkg orders letters before
+    non-letters, so 0ubuntu3a < 0ubuntu3.1 even though ASCII would put '.'
+    before 'a'. Everything else ('.', '+', ...) sorts above letters. The
+    end-of-string sentinel sorts above '~' but below letters (the prefix
+    rule makes "" < "a" within the letter class). Covers the character set
+    that actually appears in Ubuntu pool revisions (digits, letters, '.',
+    '+', '-', '~').
     """
+    def char_key(tok: str) -> str:
+        out = []
+        for ch in tok:
+            if ch == "~":
+                out.append("\x01")
+            elif ch.isalpha():
+                out.append("\x02" + ch)
+            else:
+                out.append("\x03" + ch)
+        return "".join(out)
+
     key = []
     for tok in re.split(r"(\d+)", ver):
         if tok.isdigit():
             key.append((1, int(tok), "\x00"))
         elif tok:
-            key.append((0, 0, tok.replace("~", "\x01")))
+            key.append((0, 0, char_key(tok)))
     key.append((0, 0, "\x02"))  # end-of-string sentinel
     return tuple(key)
 
@@ -537,23 +555,79 @@ def _do_patch(binary, glibc, glibc_dir, glibc_version, arch, mode, no_rpath):
 # restore
 # ---------------------------------------------------------------------------
 
+def _consume_patch_manifest(binary: Path) -> bool:
+    """Remove files copied by `patch --mode copy`, as listed in its manifest.
+
+    Returns True when a manifest was found (and consumed). Each entry is a
+    relative path; only files resolving directly into binary.parent (or one
+    level down, into binary.parent/.debug) are deleted — a tampered or
+    traversing manifest cannot remove anything elsewhere.
+    """
+    parent = binary.parent
+    # keep in sync with patcher.PATCHED_MANIFEST_SUFFIX
+    manifest = parent / (binary.name + ".patched.manifest")
+    if not manifest.is_file():
+        return False
+
+    entries: list[str] = []
+    try:
+        data = json.loads(manifest.read_text())
+        if isinstance(data, dict) and isinstance(data.get("files"), list):
+            entries = [e for e in data["files"] if isinstance(e, str)]
+    except (OSError, ValueError):
+        pass  # unreadable/corrupt manifest: nothing we can safely delete
+
+    debug_dir = parent / ".debug"
+    removed: list[str] = []
+    for rel in entries:
+        resolved = (parent / rel).resolve()
+        if resolved in (binary, manifest):
+            continue
+        if resolved.parent not in (parent, debug_dir):
+            continue  # refuses traversal / tampered entries
+        if resolved.is_file() or resolved.is_symlink():
+            resolved.unlink()
+            removed.append(resolved.name)
+
+    if debug_dir.is_dir() and not any(debug_dir.iterdir()):
+        debug_dir.rmdir()
+
+    manifest.unlink()
+    if removed:
+        summary = ", ".join(removed[:5])
+        if len(removed) > 5:
+            summary += f", +{len(removed) - 5} more"
+        console.print(f"[dim]Removed {len(removed)} copied files ({summary})[/dim]")
+    return True
+
+
 @cli.command()
 @click.argument("binary", type=click.Path(exists=True, path_type=Path))
 def restore(binary):
     """Remove the .patched file created by pwnlibc patch, or restore a legacy .bak backup.
 
-    Copied libc-*.so files from copy-mode patching are deliberately not
-    deleted — they cannot be safely attributed to pwnlibc vs challenge files.
+    Copy-mode patching records the files it copied in a
+    <binary>.patched.manifest; when present, restore removes those copied
+    libs and .debug files (an emptied .debug directory goes too). Copied
+    files from older versions without a manifest — and manual/challenge
+    files — are still left untouched.
     """
     binary = binary.resolve()
 
     from .patcher import PATCHED_SUFFIX
     patched = binary.parent / (binary.name + PATCHED_SUFFIX)
 
+    handled = False
     if patched.exists():
         patched.unlink()
         console.print(f"[green]Removed {patched.name}[/green]")
-    else:
+        handled = True
+
+    # Consumed even when .patched is gone (user may have deleted it manually).
+    if _consume_patch_manifest(binary):
+        handled = True
+
+    if not handled:
         from .backup import restore_backup
         removed = restore_backup(binary)
         if removed:
@@ -646,7 +720,13 @@ def remove(ctx, versions, arch, variant, keep_cache):
         if not keep_cache and variant in ("deb", "all"):
             cache_dir = glibc_dir / ".cache"
             if cache_dir.is_dir():
-                for deb_file in cache_dir.glob(f"libc6*_{version}-*"):
+                # With --arch, other arches may still be installed and must
+                # keep their cached .debs — prune only that arch's files.
+                if arch == "all":
+                    cache_pattern = f"libc6*_{version}-*"
+                else:
+                    cache_pattern = f"libc6*_{version}-*_{ARCH_INFO[arch]['deb_arch']}.deb"
+                for deb_file in cache_dir.glob(cache_pattern):
                     deb_file.unlink()
                     console.print(f"  [dim]Removed cache: {deb_file.name}[/dim]")
 
@@ -1151,7 +1231,8 @@ def verify(ctx, fix, verbose, mirror):
     """Verify installed glibc against official Ubuntu packages.
 
     Exits with status 1 when problems (MISSING/MISMATCH/errors) are found,
-    or with --fix when at least one fix attempt fails. Exits 0 otherwise.
+    or with --fix when at least one fix attempt fails (installs whose
+    verification errored are retried too). Exits 0 otherwise.
     """
     glibc_dir = ctx.obj["glibc_dir"]
     if fix:
@@ -1203,6 +1284,10 @@ def verify(ctx, fix, verbose, mirror):
             table.add_row(inst.version, inst.arch, "*", "[red]error[/red]", str(e))
             has_rows = True
             problem_count += 1
+            # Verification itself failed — with --fix, retry the install via a
+            # fresh download like any other problem (its cached .deb may be the
+            # culprit). A failed retry then counts towards fix_failed.
+            versions_to_fix.append((inst, pkg))
             continue
 
         needs_fix = False

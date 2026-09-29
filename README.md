@@ -116,6 +116,8 @@ Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs t
 
 Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`.
 
+Integrity: every downloaded `.deb` is checked against the SHA256 recorded in the owning suite's `Packages` index (`<mirror>/dists/<suite>/main/binary-<arch>/Packages.xz`); a mismatch deletes the file and aborts that version. Indices are cached under `<glibc-dir>/.cache/indices/` for 7 days. Files no index lists (EOL leftovers like trusty-era debs, or superseded revisions) are downloaded without verification. All mirrors are fetched over HTTPS.
+
 ### `pwnlibc download-all`
 
 Download all available glibc versions for specified architecture(s).
@@ -196,6 +198,7 @@ Architecture is auto-detected from the ELF header. When source is available, out
 ### `pwnlibc restore BINARY`
 
 Remove the `.patched` file created by `pwnlibc patch`. Also supports legacy `.bak` backups.
+Copy-mode patching records a `<binary>.patched.manifest`, and `restore` removes the copied libs and `.debug` files listed there (plus the `.debug` directory once it is empty).
 
 ```bash
 pwnlibc restore ./vuln
@@ -225,7 +228,7 @@ pwnlibc verify -v             # also show MATCH entries
 pwnlibc verify --fix          # re-download mismatched/missing files
 ```
 
-Only verifies `deb` variant installs (not source-built ones). By default only shows problems (MISSING/MISMATCH); use `-v` to see all entries. Exits with status 1 when problems are found (or, with `--fix`, when a fix attempt fails) so scripts and CI can detect failures.
+Only verifies `deb` variant installs (not source-built ones). By default only shows problems (MISSING/MISMATCH); use `-v` to see all entries. Exits with status 1 when problems are found (or, with `--fix`, when a fix attempt fails) so scripts and CI can detect failures. The cached reference `.deb` is also validated against the dists SHA256 before file contents are compared — a tampered or truncated cache entry is reported as an error (and removed) instead of silently producing MISMATCH rows; when no index pins the deb, verification falls back to content comparison as before.
 
 ### `pwnlibc source`
 

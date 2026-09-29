@@ -490,6 +490,31 @@ class TestBuildConfigureArgs:
 
     @patch("pwnlibc.builder.subprocess.run")
     @patch("urllib.request.urlopen")
+    def test_no_enable_debug_flag(self, mock_urlopen, mock_run, tmp_path):
+        """glibc configure has no --enable-debug option (it would be a silent
+        no-op); only --disable-werror is passed, debug info comes from CFLAGS."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_urlopen.return_value = _make_mock_urlopen()
+
+        configure_cmd = None
+        base_effect = _make_build_run_side_effect("2.31")
+
+        def run_side_effect(cmd, **kwargs):
+            nonlocal configure_cmd
+            if "configure" in str(cmd[0]):
+                configure_cmd = cmd
+            return base_effect(cmd, **kwargs)
+
+        mock_run.side_effect = run_side_effect
+
+        build_glibc("2.31", "amd64", glibc_dir)
+        assert configure_cmd is not None
+        assert "--disable-werror" in configure_cmd
+        assert not any("--enable-debug" in arg for arg in configure_cmd)
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
     def test_amd64_no_host_flag(self, mock_urlopen, mock_run, tmp_path):
         """amd64 build should NOT have --host flag."""
         glibc_dir = tmp_path / "glibc"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ from .elfutil import get_debuglink, get_needed_libs
 from .glibc import GlibcInstall, find_library
 
 PATCHED_SUFFIX = ".patched"
+PATCHED_MANIFEST_SUFFIX = ".patched.manifest"
 
 
 def _run_patchelf(args: list[str]):
@@ -59,19 +61,20 @@ def _find_debug_file(debug_dir: Path, lib: Path) -> Path | None:
     return None
 
 
-def _copy_debug_files(glibc: GlibcInstall, copied_libs: list[Path], target_dir: Path):
+def _copy_debug_files(glibc: GlibcInstall, copied_libs: list[Path], target_dir: Path) -> list[str]:
+    """Copy matching debug files; return their paths relative to target_dir."""
     debug_dir = glibc.lib_dir / ".debug"
     if not debug_dir.is_dir():
-        return 0
+        return []
     target_debug = target_dir / ".debug"
     target_debug.mkdir(exist_ok=True)
-    count = 0
+    copied = []
     for lib in copied_libs:
         dbg_src = _find_debug_file(debug_dir, lib)
         if dbg_src is not None:
             shutil.copy2(dbg_src, target_debug / dbg_src.name)
-            count += 1
-    return count
+            copied.append(f".debug/{dbg_src.name}")
+    return copied
 
 
 def _collect_extra_libs(binary: Path, glibc: GlibcInstall) -> list[tuple[str, Path]]:
@@ -105,12 +108,23 @@ def patch_copy(binary: Path, glibc: GlibcInstall, set_rpath: bool = True) -> tup
     copied_files.extend([target_dir / libc_copy, target_dir / ld_copy])
 
     extra = _collect_extra_libs(patched, glibc)
+    extra_names = []
     for soname, lib_path in extra:
         copy_name = lib_path.name
         _copy_lib(lib_path, target_dir / copy_name)
         copied_files.append(target_dir / copy_name)
+        extra_names.append(copy_name)
 
-    _copy_debug_files(glibc, copied_files, target_dir)
+    debug_files = _copy_debug_files(glibc, copied_files, target_dir)
+
+    # Record every file we created next to the binary (keyed on the ORIGINAL
+    # binary name, not the .patched copy) so `pwnlibc restore` can remove
+    # exactly these and nothing else. Written before the patchelf calls: a
+    # mid-patch failure still leaves a consumable cleanup record, and
+    # re-patching simply overwrites it with the new list.
+    manifest_files = [libc_copy, ld_copy] + extra_names + debug_files
+    manifest_path = binary.parent / (binary.name + PATCHED_MANIFEST_SUFFIX)
+    manifest_path.write_text(json.dumps({"files": manifest_files}, indent=1) + "\n")
 
     # Order matters: rpath first, then replace-needed, interpreter last.
     # Reversing this causes "Loadable section outside of ELF segments" in GDB.

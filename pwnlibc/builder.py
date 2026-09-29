@@ -115,11 +115,13 @@ def build_glibc(
 
         env = dict(os.environ)
 
+        # No --enable-debug: glibc's configure has no such AC_ARG_ENABLE
+        # option (it hardcodes enable_option_checking=no, so the flag would
+        # be a silent no-op). Debug info comes from CFLAGS="-g3" below.
         configure_args = [
             str(src_dir / "configure"),
             "--prefix=/",
             "--disable-werror",
-            "--enable-debug=yes",
         ]
 
         if arch == "i686":
