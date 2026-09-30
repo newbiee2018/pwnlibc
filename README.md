@@ -26,14 +26,31 @@ git submodule update --init --recursive
 
 ## Install
 
+Recommended — [pipx](https://pipx.pypa.io) (isolated venv, no dependency pollution, easy upgrades):
+
+```bash
+sudo apt install pipx                     # if not already installed
+pipx install --editable /path/to/pwnlibc  # from your clone of this repo
+pipx ensurepath
+```
+
+`--editable` makes the `pwnlibc` command always run your current checkout: `git pull` and local edits apply immediately, no reinstall needed. For a snapshot install instead, drop `--editable` and update later with `pipx upgrade pwnlibc`. Once published, `pipx install git+https://github.com/newbiee2018/pwnlibc.git` will work the same way.
+
+Upgrade / uninstall:
+
+```bash
+pipx upgrade pwnlibc      # snapshot installs only; editable installs update automatically
+pipx uninstall pwnlibc
+```
+
+Or run the repo installer, which sets up `/glibc/` and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
+
 ```bash
 cd pwnlibc/
 bash install.sh
 ```
 
-This installs Python dependencies (`click`, `rich`), adds the package to Python's path, and creates `/usr/local/bin/pwnlibc`.
-
-Alternatively, run directly without installing:
+Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `sudo mkdir -p /glibc && sudo chown $(id -u):$(id -g) /glibc`) sets that up. Alternatively, run directly without installing:
 
 ```bash
 pip3 install click rich
@@ -380,7 +397,8 @@ pwnlibc/
 │   ├── downloader.py      # mirror scraping, .deb download/extract, verify
 │   ├── builder.py         # source download, configure, cross-compile
 │   └── backup.py          # backup/restore logic
-├── tests/                 # pytest suite (113+ tests)
+├── tests/                 # pytest suite (650+ tests)
+├── pyproject.toml         # packaging metadata + pwnlibc console script
 ├── requirements.txt
 ├── install.sh
 └── README.md

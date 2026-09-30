@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pwnlibc"
+dynamic = ["version"]
+description = "CTF glibc manager and ELF patcher: download, build, verify, and patch glibc for source-level debugging"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "newbiee2018" }]
+keywords = ["ctf", "pwn", "glibc", "patchelf", "debugging", "elf"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/newbiee2018/pwnlibc"
+
+[project.scripts]
+pwnlibc = "pwnlibc.cli:cli"
+
+[tool.setuptools]
+# Explicit list: keeps tests/ and the debug_glibc submodule out of the wheel
+packages = ["pwnlibc"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pwnlibc.__version__" }
