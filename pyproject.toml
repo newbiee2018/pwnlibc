@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=77"]
+# setuptools 61 is the first with PEP 621 pyproject support and still the
+# newest line installable on Python 3.8 (setuptools >=76 needs >=3.9), so
+# the metadata below sticks to what 61..current all accept.
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +11,12 @@ dynamic = ["version"]
 description = "CTF glibc manager and ELF patcher: download, build, verify, and patch glibc for source-level debugging"
 readme = "README.md"
 requires-python = ">=3.8"
-license = "MIT"
-license-files = ["LICENSE"]
 authors = [{ name = "newbiee2018" }]
 keywords = ["ctf", "pwn", "glibc", "patchelf", "debugging", "elf"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Security",

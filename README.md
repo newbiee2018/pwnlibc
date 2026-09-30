@@ -43,6 +43,16 @@ pipx upgrade pwnlibc      # snapshot installs only; editable installs update aut
 pipx uninstall pwnlibc
 ```
 
+No pipx (e.g. stock Python 3.8+ systems)? Plain pip works too:
+
+```bash
+python3 -m pip install --user --editable /path/to/pwnlibc
+# newer Debian/Ubuntu (PEP 668) needs the bypass flag BEFORE the path:
+python3 -m pip install --user --break-system-packages --editable /path/to/pwnlibc
+```
+
+The `pwnlibc` command lands in `~/.local/bin` (add it to PATH if needed). Uninstall with `python3 -m pip uninstall pwnlibc`. `bash install.sh` picks the best method automatically: pipx when present, then pip `--user` (editable), then a legacy `.pth` path-hook fallback that needs no pip at all — and it cleans up artifacts older versions of the script left behind.
+
 Or run the repo installer, which sets up `/glibc/` and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
 
 ```bash

@@ -23,47 +23,27 @@ fi
 echo ""
 echo "[2/2] Installing the pwnlibc command..."
 
-if command -v pipx >/dev/null 2>&1; then
-    # Remove the legacy wrapper from older install.sh runs — it would shadow
-    # the pipx-provided console script in ~/.local/bin.
-    LEGACY="$HOME/.local/bin/pwnlibc"
-    if [ -f "$LEGACY" ] && grep -q "python3 -m pwnlibc" "$LEGACY" 2>/dev/null; then
-        rm -f "$LEGACY"
-        echo "  Removed legacy wrapper at $LEGACY."
-    fi
-    # Also drop the legacy .pth path hook if present
-    SITE_PACKAGES="$(python3 -c 'import site; print(site.getusersitepackages())')"
-    if [ -f "$SITE_PACKAGES/pwnlibc.pth" ]; then
-        rm -f "$SITE_PACKAGES/pwnlibc.pth"
-        echo "  Removed legacy path hook at $SITE_PACKAGES/pwnlibc.pth."
-    fi
+# Clean up artifacts from pre-pipx install.sh runs: the wrapper would shadow
+# the pip/pipx-provided console script, and the .pth hook double-imports.
+LEGACY="$HOME/.local/bin/pwnlibc"
+if [ -f "$LEGACY" ] && grep -q "python3 -m pwnlibc" "$LEGACY" 2>/dev/null; then
+    rm -f "$LEGACY"
+    echo "  Removed legacy wrapper at $LEGACY."
+fi
+SITE_PACKAGES="$(python3 -c 'import site; print(site.getusersitepackages())')"
+if [ -f "$SITE_PACKAGES/pwnlibc.pth" ]; then
+    rm -f "$SITE_PACKAGES/pwnlibc.pth"
+    echo "  Removed legacy path hook at $SITE_PACKAGES/pwnlibc.pth."
+fi
 
-    # --editable: the command always runs this checkout, so git pull / edits
-    # apply without reinstalling. Idempotent: reinstall falls back to upgrade.
-    if pipx install --editable "$SCRIPT_DIR" >/dev/null 2>&1; then
-        echo "  Installed via pipx (editable, from $SCRIPT_DIR)."
-    else
-        pipx upgrade pwnlibc >/dev/null 2>&1 || pipx install --editable --force "$SCRIPT_DIR" >/dev/null 2>&1
-        echo "  Already installed via pipx — refreshed."
-    fi
-    pipx ensurepath >/dev/null 2>&1 || true
-else
-    echo "  pipx not found — falling back to the legacy method."
-    echo "  (Recommended instead: sudo apt install pipx, then re-run this script.)"
-    echo ""
-
+# Legacy no-pip method: apt deps + .pth path hook + shell wrapper.
+install_legacy() {
     if python3 -c "import click, rich" 2>/dev/null; then
         echo "  click and rich already available."
-    elif pip3 install --user -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null; then
-        echo "  Installed via pip3 --user."
-    elif pip3 install -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null; then
-        echo "  Installed via pip3."
     else
-        echo "  pip failed. Trying apt..."
+        echo "  Installing dependencies via apt (needs sudo)..."
         sudo apt install -y python3-click python3-rich
     fi
-
-    SITE_PACKAGES="$(python3 -c 'import site; print(site.getusersitepackages())')"
     mkdir -p "$SITE_PACKAGES"
     echo "$SCRIPT_DIR" > "$SITE_PACKAGES/pwnlibc.pth"
 
@@ -76,22 +56,60 @@ EOF
     chmod 755 "$LOCAL_WRAPPER"
     echo "  Command:     $LOCAL_WRAPPER"
     echo "  Python path: $SITE_PACKAGES/pwnlibc.pth"
+}
+
+if command -v pipx >/dev/null 2>&1; then
+    # --editable: the command always runs this checkout, so git pull / edits
+    # apply without reinstalling. Idempotent: reinstall falls back to upgrade.
+    if pipx install --editable "$SCRIPT_DIR" >/dev/null 2>&1; then
+        echo "  Installed via pipx (editable, from $SCRIPT_DIR)."
+    else
+        pipx upgrade pwnlibc >/dev/null 2>&1 || pipx install --editable --force "$SCRIPT_DIR" >/dev/null 2>&1
+        echo "  Already installed via pipx — refreshed."
+    fi
+    pipx ensurepath >/dev/null 2>&1 || true
+elif python3 -m pip --version >/dev/null 2>&1; then
+    # No pipx: plain pip --user. Also editable for the same auto-update
+    # behaviour. Newer Debian/Ubuntu refuses user installs under PEP 668
+    # unless --break-system-packages is given — and the flag must come
+    # BEFORE --editable, which consumes the next token as its value.
+    echo "  pipx not found — installing with pip --user."
+    echo "  (Recommended for isolation: sudo apt install pipx, then re-run.)"
+    if python3 -m pip install -q --user --editable "$SCRIPT_DIR" 2>/dev/null; then
+        echo "  Installed via pip --user (editable, from $SCRIPT_DIR)."
+    elif python3 -m pip install -q --user --break-system-packages --editable "$SCRIPT_DIR" 2>/dev/null; then
+        echo "  Installed via pip --user (editable, --break-system-packages)."
+    else
+        echo "  pip install failed — falling back to the legacy method."
+        install_legacy
+    fi
+    echo "  Command installed at $HOME/.local/bin/pwnlibc"
+else
+    echo "  Neither pipx nor pip found — using the legacy method."
+    install_legacy
 fi
 
-# Verify
+# Verify (the command may not be on this shell's PATH yet on first install)
 echo ""
-if command -v pwnlibc >/dev/null 2>&1 && pwnlibc --help >/dev/null 2>&1; then
+BIN=""
+if command -v pwnlibc >/dev/null 2>&1; then
+    BIN="pwnlibc"
+elif [ -x "$HOME/.local/bin/pwnlibc" ]; then
+    BIN="$HOME/.local/bin/pwnlibc"
+fi
+if [ -n "$BIN" ] && "$BIN" --help >/dev/null 2>&1; then
     echo "=== Install complete ==="
     echo ""
     echo "Usage:    pwnlibc --help"
     echo "Glibc dir: $GLIBC_DIR"
     echo "Update:   git pull (editable install picks it up automatically)"
-    echo "Remove:   pipx uninstall pwnlibc"
+    echo "Remove:   pipx uninstall pwnlibc  (or: python3 -m pip uninstall pwnlibc)"
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
         *) echo ""
-           echo "NOTE: Add ~/.local/bin to your PATH if not already:"
-           echo "  pipx ensurepath" ;;
+           echo "NOTE: $HOME/.local/bin is not on your PATH for this shell."
+           echo "  Add it:  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+           echo "  (or run: pipx ensurepath)" ;;
     esac
 else
     echo "=== Install failed ==="

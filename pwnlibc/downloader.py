@@ -205,7 +205,8 @@ def _extract_deb(deb_path: Path, out_dir: Path, arch: str):
             if item.is_symlink():
                 if dest.exists() or dest.is_symlink():
                     dest.unlink()
-                dest.symlink_to(item.readlink())
+                # os.readlink, not Path.readlink: the latter needs Python 3.9
+                dest.symlink_to(os.readlink(item))
             elif item.is_file():
                 shutil.copy2(item, dest)
             elif item.is_dir():
@@ -553,7 +554,8 @@ def verify_against_deb(
             # For old glibc (≤2.33), key names are symlinks to versioned files.
             # Resolve to compare the real binaries.
             if ref_file.is_symlink():
-                target_name = ref_file.readlink()
+                # os.readlink, not Path.readlink: the latter needs Python 3.9
+                target_name = os.readlink(ref_file)
                 ref_file = ref_dir / target_name
                 if not ref_file.exists():
                     continue
