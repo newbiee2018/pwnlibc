@@ -161,6 +161,15 @@ MIRRORS = {
 }
 
 GNU_SOURCE_BASE = "https://ftp.gnu.org/gnu/glibc/"
+
+# Mirrors belong to a distribution family. Package revisions are only
+# comparable within a family: Debian's 2.28-10 and Ubuntu's 2.28-0ubuntu1
+# are different package streams, so "newest" must never be decided across
+# families.
+MIRROR_FAMILY = {
+    "ubuntu": "ubuntu", "tsinghua": "ubuntu", "old-ubuntu": "ubuntu",
+    "ports": "ubuntu", "debian": "debian", "old-debian": "debian",
+}
 GNU_SOURCE_FORMATS = [
     "glibc-{version}.tar.xz",
     "glibc-{version}.tar.gz",

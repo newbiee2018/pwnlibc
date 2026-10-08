@@ -294,18 +294,21 @@ class TestPickBest:
             assert list(best.values())[0].mirror == "ubuntu"
 
     def test_tie_two_unknown_mirrors_is_stable(self):
-        """First encountered is kept regardless of which unknown mirrors."""
+        """Out-of-chain ties: same-family mirror (tsinghua for amd64) beats
+        the other family (debian) regardless of order; two genuinely
+        unknown mirrors keep the first encountered."""
         best = _pick_best([
-            _pkg("2.31-0ubuntu9.16_amd64", mirror="tsinghua"),
             _pkg("2.31-0ubuntu9.16_amd64", mirror="debian"),
+            _pkg("2.31-0ubuntu9.16_amd64", mirror="tsinghua"),
         ])
         assert list(best.values())[0].mirror == "tsinghua"
 
         best = _pick_best([
-            _pkg("2.31-0ubuntu9.16_amd64", mirror="debian"),
-            _pkg("2.31-0ubuntu9.16_amd64", mirror="tsinghua"),
+            _pkg("2.31-0ubuntu9.16_amd64", mirror="mirror-a"),
+            _pkg("2.31-0ubuntu9.16_amd64", mirror="mirror-b"),
         ])
-        assert list(best.values())[0].mirror == "debian"
+        assert list(best.values())[0].mirror == "mirror-a"
+
 
     def test_newer_revision_on_secondary_mirror_beats_older_on_primary(self):
         """dpkg ordering dominates the mirror tie-break."""
@@ -318,6 +321,114 @@ class TestPickBest:
 
     def test_empty_input(self):
         assert _pick_best([]) == {}
+
+    def test_debian_revision_never_shadows_ubuntu_for_amd64(self):
+        # The 2.28 bug: Debian's 2.28-10 outranked Ubuntu's 2.28-0ubuntu1
+        # under dpkg ordering, making `available` report the wrong origin.
+        best = _pick_best([
+            _pkg("2.28-0ubuntu1_amd64", mirror="old-ubuntu"),
+            _pkg("2.28-10_amd64", mirror="old-debian"),
+        ])
+        assert best[("2.28", "amd64")].mirror == "old-ubuntu"
+
+    def test_ubuntu_never_shadows_debian_for_mipsel(self):
+        best = _pick_best([
+            _pkg("2.28-1_mipsel", mirror="debian", arch="mipsel"),
+            _pkg("2.28-0ubuntu1_mipsel", mirror="old-ubuntu", arch="mipsel"),
+        ])
+        assert best[("2.28", "mipsel")].mirror == "debian"
+
+
+class TestAutoChainOnly:
+    """Auto mode catalog = exactly what download would fetch."""
+
+    def test_debian_amd64_packages_dropped(self):
+        from pwnlibc.cli import _auto_chain_only
+        pkgs = [
+            _pkg("2.28-0ubuntu1_amd64", mirror="old-ubuntu"),
+            _pkg("2.28-10_amd64", mirror="old-debian"),
+            _pkg("2.28-1_mipsel", mirror="debian", arch="mipsel"),
+        ]
+        kept = _auto_chain_only(pkgs)
+        assert [p.mirror for p in kept] == ["old-ubuntu", "debian"]
+
+    def test_out_of_chain_only_means_empty(self):
+        from pwnlibc.cli import _auto_chain_only
+        assert _auto_chain_only([_pkg("2.36-9_amd64", mirror="debian")]) == []
+
+    def _mirror_html(self, **by_mirror):
+        """Patch _fetch_index keyed by mirror URL (the scrape seam)."""
+        from pwnlibc.config import MIRRORS
+        url_map = {MIRRORS[m]: html for m, html in by_mirror.items()}
+        return patch("pwnlibc.downloader._fetch_index",
+                     side_effect=lambda url: url_map.get(url, ""))
+
+    def test_available_auto_shows_no_debian_rows_for_x86(self, runner, tmp_path):
+        # default arch=all scrapes debian for mipsel's sake; the amd64 2.28
+        # row must stay with its ubuntu-family origin, not old-debian.
+        u_html = '<a href="libc6_2.28-0ubuntu1_amd64.deb">libc6_2.28-0ubuntu1_amd64.deb</a>'
+        d_html = '<a href="libc6_2.28-10_amd64.deb">libc6_2.28-10_amd64.deb</a>'
+        with self._mirror_html(**{"ubuntu": u_html, "old-ubuntu": u_html, "debian": d_html,
+                                  "old-debian": d_html, "ports": u_html}):
+            res = runner.invoke(cli, ["--glibc-dir", str(tmp_path),
+                                      "available", "--no-check-source"])
+        assert res.exit_code == 0
+        flat = " ".join(res.output.split())
+        assert "2.28" in flat and "amd64" in flat
+        # mirror names legitimately appear in the fetch header; table rows
+        # start with the box char, so assert no debian-sourced ROW exists
+        assert "│ old-debian" not in res.output and "│ debian" not in res.output
+
+    def test_verify_auto_checks_against_same_origin_as_download(self, runner, tmp_path):
+        # CRUD consistency: verify must fetch the reference .deb from the
+        # same mirror family download used, not a higher-revisioned debian one.
+        from tests.conftest import _build_minimal_elf
+        g = tmp_path / "2.28" / "amd64" / "lib"
+        g.mkdir(parents=True)
+        _build_minimal_elf(g / "libc.so.6")
+        _build_minimal_elf(g / "ld-linux-x86-64.so.2")
+        u_html = '<a href="libc6_2.28-0ubuntu1_amd64.deb">libc6_2.28-0ubuntu1_amd64.deb</a>'
+        d_html = '<a href="libc6_2.28-10_amd64.deb">libc6_2.28-10_amd64.deb</a>'
+        with self._mirror_html(**{"ubuntu": "", "old-ubuntu": u_html, "debian": d_html,
+                                  "old-debian": d_html}), \
+             patch("pwnlibc.cli.verify_against_deb", return_value=[("libc.so.6", "MATCH", "x")]) as mock_v:
+            res = runner.invoke(cli, ["--glibc-dir", str(tmp_path), "verify"])
+        assert res.exit_code == 0
+        assert mock_v.call_args.kwargs["mirror"] == "old-ubuntu"
+
+    def test_download_not_found_hints_other_arches(self, runner, tmp_path):
+        # 2.99 exists only for mipsel (debian) — the error must say so.
+        # x86 scrapes ubuntu/old-ubuntu; the hint scans the rest.
+        m_html = '<a href="libc6_2.99-1_mipsel.deb">libc6_2.99-1_mipsel.deb</a>'
+        with self._mirror_html(debian=m_html):
+            res = runner.invoke(cli, ["--glibc-dir", str(tmp_path),
+                                      "download", "2.99", "--no-dbg", "--no-source"])
+        assert res.exit_code == 1
+        flat = " ".join(res.output.split())
+        assert "exists for mipsel" in flat
+        assert "--arch" in flat
+
+    def test_download_not_found_hints_other_mirror(self, runner, tmp_path):
+        # amd64 package exists only on debian (out of chain in auto mode).
+        d_html = '<a href="libc6_2.99-1_amd64.deb">libc6_2.99-1_amd64.deb</a>'
+        with self._mirror_html(debian=d_html):
+            res = runner.invoke(cli, ["--glibc-dir", str(tmp_path),
+                                      "download", "2.99", "--no-dbg", "--no-source"])
+        assert res.exit_code == 1
+        flat = " ".join(res.output.split())
+        assert "found on debian" in flat
+        assert "--mirror" in flat
+
+    def test_download_success_prints_mirror(self, runner, tmp_path):
+        html = '<a href="libc6_2.28-0ubuntu1_amd64.deb">libc6_2.28-0ubuntu1_amd64.deb</a>'
+        with self._mirror_html(**{"ubuntu": "", "old-ubuntu": html}), \
+             patch("pwnlibc.cli.download_glibc"):
+            res = runner.invoke(cli, ["--glibc-dir", str(tmp_path),
+                                      "download", "2.28", "--arch", "amd64",
+                                      "--no-dbg", "--no-source"])
+        assert res.exit_code == 0
+        flat = " ".join(res.output.split())
+        assert "2.28/amd64 installed (old-ubuntu)" in flat
 
 
 # ---------------------------------------------------------------------------

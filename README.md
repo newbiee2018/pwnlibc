@@ -123,7 +123,7 @@ pwnlibc available --arch powerpc           # just powerpc (from old-releases)
 pwnlibc available --mirror old-ubuntu      # only old-releases mirror
 ```
 
-Shows a numbered table with version, arch, mirror, debug .deb availability, GNU source availability, and installed variant. Source availability is checked against ftp.gnu.org (use `--no-check-source` to skip). The "Debug .deb" column shows whether the mirror has a matching `libc6-dbg` package. The "Installed" column shows what's locally installed — `deb(dbg)` means installed with debug symbols, `deb` means installed without. The "Mirror" column shows the mirror the package was actually found on (e.g. EOL versions show `old-ubuntu`).
+Shows a numbered table with version, arch, mirror, debug .deb availability, GNU source availability, and installed variant. In auto mode each arch is listed from its own mirror chain (x86 and non-x86 from Ubuntu mirrors, mips from Debian), so the table shows exactly what `pwnlibc download` would fetch for that entry; use `--mirror` to inspect a specific mirror outside the chain. Source availability is checked against ftp.gnu.org (use `--no-check-source` to skip). The "Debug .deb" column shows whether the mirror has a matching `libc6-dbg` package. The "Installed" column shows what's locally installed — `deb(dbg)` means installed with debug symbols, `deb` means installed without. The "Mirror" column shows the mirror the package was actually found on (e.g. EOL versions show `old-ubuntu`).
 
 ### `pwnlibc download VERSION [VERSION ...]`
 
@@ -141,7 +141,7 @@ pwnlibc download 2.19 --arch powerpc --mirror old-ubuntu  # old powerpc
 
 Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs to `<glibc-dir>/<version>/<arch>/lib/`.
 
-Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`.
+Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`. Each installed line reports the mirror it came from, and Ubuntu/Debian package revisions are never compared across distributions — the origin shown by `available` is the origin `download` uses and `verify` checks against.
 
 Integrity: every downloaded `.deb` is checked against the SHA256 recorded in the owning suite's `Packages` index (`<mirror>/dists/<suite>/main/binary-<arch>/Packages.xz`); a mismatch deletes the file and aborts that version. Indices are cached under `<glibc-dir>/.cache/indices/` for 7 days. Files no index lists (EOL leftovers like trusty-era debs, or superseded revisions) are downloaded without verification. All mirrors are fetched over HTTPS.
 

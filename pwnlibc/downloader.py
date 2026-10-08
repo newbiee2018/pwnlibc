@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import ARCH_INFO, MIRRORS
+from .config import ARCH_INFO, MIRRORS, MIRROR_FAMILY
 
 _ALL_DEB_ARCHES = "|".join(info["deb_arch"] for info in ARCH_INFO.values())
 
@@ -40,12 +40,9 @@ _DEBIAN_SUITES = {
     "2.36": "bookworm", "2.41": "trixie",
 }
 
-# mirror key -> package origin, which decides the suite table above.
-# Mirrors not listed here skip hash verification entirely.
-_MIRROR_ORIGIN = {
-    "ubuntu": "ubuntu", "tsinghua": "ubuntu", "old-ubuntu": "ubuntu",
-    "ports": "ubuntu", "debian": "debian", "old-debian": "debian",
-}
+# mirror key -> package origin (shared MIRROR_FAMILY), decides the suite
+# table above. Mirrors not listed there skip hash verification entirely.
+_MIRROR_ORIGIN = MIRROR_FAMILY
 
 # Cached dists indices (and miss markers) older than this are refreshed.
 _INDEX_TTL_SECONDS = 7 * 86464

@@ -22,7 +22,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from .config import ALL_ARCHES, ARCH_INFO, DEFAULT_GLIBC_DIR, MIRRORS, X86_ARCHES, parse_version
+from .config import ALL_ARCHES, ARCH_INFO, DEFAULT_GLIBC_DIR, MIRRORS, MIRROR_FAMILY, X86_ARCHES, parse_version
 from .downloader import (
     DebPackage,
     download_glibc,
@@ -134,18 +134,57 @@ def _deb_version_key(ver: str) -> tuple:
 
 
 def _pkg_beats(a: DebPackage, b: DebPackage) -> bool:
-    """Whether a replaces b as the best pick: newer dpkg-style revision, or on
-    an exact revision tie the one from the earlier (primary) mirror."""
+    """Whether a replaces b as the best pick.
+
+    Packages from the arch's own distribution family always beat the other
+    family: Debian and Ubuntu revision numbers are different package
+    streams and must never be compared (Debian's 2.28-10 would otherwise
+    shadow Ubuntu's 2.28-0ubuntu1). Within the family: newer dpkg-style
+    revision, then the earlier (primary) mirror on an exact tie.
+    """
+    fam_a = _pkg_family(a)
+    fam_b = _pkg_family(b)
+    if fam_a != fam_b:
+        return fam_a < fam_b
+
     key_a = _deb_version_key(a.full_id.rsplit("_", 1)[0])
     key_b = _deb_version_key(b.full_id.rsplit("_", 1)[0])
     if key_a != key_b:
         return key_a > key_b
+
     mirrors = _mirrors_for_arch(a.arch)
 
     def rank(m: str) -> int:
         return mirrors.index(m) if m in mirrors else len(mirrors)
 
     return rank(a.mirror) < rank(b.mirror)
+
+
+def _pkg_family(pkg: DebPackage) -> int:
+    """0 when the package's mirror family matches the arch's primary family
+    (amd64←ubuntu, mipsel←debian, ...), 1 otherwise."""
+    primary = MIRROR_FAMILY.get(ARCH_INFO.get(pkg.arch, {}).get("mirror", "ubuntu"), "ubuntu")
+    return 0 if MIRROR_FAMILY.get(pkg.mirror) == primary else 1
+
+
+def _auto_chain_only(packages: list[DebPackage]) -> list[DebPackage]:
+    """Auto mode: keep only packages from each arch's own mirror chain, so
+    the catalog (available) shows exactly what download would fetch. A
+    Debian amd64 package scraped for mipsel's sake must not appear (or be
+    picked) for amd64; it's reachable explicitly via --mirror debian."""
+    return [p for p in packages if p.mirror in _mirrors_for_arch(p.arch)]
+
+
+def _where_is_version(version: str, tried: set[str], wanted_arches: list[str]):
+    """Scan the mirrors a command didn't already scrape, to explain where a
+    missing version lives (other arches, or out-of-chain mirrors)."""
+    rest = sorted(set(MIRRORS) - tried)
+    if not rest:
+        return [], []
+    pkgs = [p for p in _scrape_mirrors(set(rest)) if p.version == version]
+    arches = sorted({p.arch for p in pkgs if p.arch not in wanted_arches})
+    mirrors = sorted({p.mirror for p in pkgs})
+    return arches, mirrors
 
 
 def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
@@ -262,6 +301,8 @@ def available(ctx, arch, mirror, check_source):
     if not packages:
         console.print("[red]No packages found.[/red]")
         return
+    if mirror == "auto":
+        packages = _auto_chain_only(packages)
 
     installs = discover_installed(glibc_dir)
     installed_map: dict[tuple[str, str], str] = {}
@@ -1008,17 +1049,24 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
 
     console.print(f"[bold]Fetching package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim]")
     all_packages = _scrape_mirrors(mirrors_to_try)
+    chain_packages = _auto_chain_only(all_packages) if mirror == "auto" else all_packages
 
     any_success = False
     for version in versions:
         matching = [
-            p for p in all_packages
+            p for p in chain_packages
             if p.version == version and p.arch in archs_to_download
         ]
 
         if not matching:
             tried = ", ".join(sorted(mirrors_to_try))
-            console.print(f"[red]{version} ({', '.join(archs_to_download)}): not found on mirrors ({tried})[/red]")
+            msg = f"{version} ({', '.join(archs_to_download)}): not found on mirrors ({tried})"
+            hint_arches, hint_mirrors = _where_is_version(version, mirrors_to_try, archs_to_download)
+            if hint_arches:
+                msg += f" — exists for {', '.join(hint_arches)}, retry with --arch"
+            elif hint_mirrors:
+                msg += f" — found on {', '.join(hint_mirrors)}, retry with --mirror"
+            console.print(f"[red]{msg}[/red]")
             continue
 
         best = _pick_best(matching)
@@ -1048,7 +1096,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                     continue
 
                 any_success = True
-                console.print(f"  [green]{version}/{pkg_arch} installed[/green]")
+                console.print(f"  [green]{version}/{pkg_arch} installed[/green] [dim]({dl_mirror})[/dim]")
 
         if source:
             src_dir = glibc_dir / version / "source"
@@ -1104,6 +1152,8 @@ def download_all(ctx, arch, mirror, with_dbg, check):
 
     console.print(f"[bold]Fetching all package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim]")
     all_packages = _scrape_mirrors(mirrors_to_try)
+    if mirror == "auto":
+        all_packages = _auto_chain_only(all_packages)
 
     filtered = [p for p in all_packages if p.arch in arches]
     best = _pick_best(filtered)
@@ -1146,7 +1196,7 @@ def download_all(ctx, arch, mirror, with_dbg, check):
         try:
             download_glibc(pkg, glibc_dir, mirror=dl_mirror, include_dbg=with_dbg)
             label = "debug added" if is_dbg_only else "installed"
-            console.print(f"  [green]{ver}/{a} {label}[/green]")
+            console.print(f"  [green]{ver}/{a} {label}[/green] [dim]({dl_mirror})[/dim]")
         except Exception as e:
             console.print(f"  [red]{ver}/{a} failed: {e}[/red]")
 
@@ -1256,6 +1306,8 @@ def verify(ctx, fix, verbose, mirror):
 
     console.print("[bold]Fetching package lists...[/bold]")
     all_packages = _scrape_mirrors(mirrors_to_try)
+    if mirror == "auto":
+        all_packages = _auto_chain_only(all_packages)
     pkg_map = _pick_best(all_packages)
 
     table = Table(title="Verification results")
