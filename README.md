@@ -53,14 +53,14 @@ python3 -m pip install --user --break-system-packages --editable /path/to/pwnlib
 
 The `pwnlibc` command lands in `~/.local/bin` (add it to PATH if needed). Uninstall with `python3 -m pip uninstall pwnlibc`. `bash install.sh` picks the best method automatically: pipx when present, then pip `--user` (editable), then a legacy `.pth` path-hook fallback that needs no pip at all — and it cleans up artifacts older versions of the script left behind.
 
-Or run the repo installer, which sets up `/glibc/` and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
+Or run the repo installer, which prompts for the glibc data directory once (Enter accepts `~/.local/share/pwnlibc`), persists your choice, and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
 
 ```bash
 cd pwnlibc/
 bash install.sh
 ```
 
-Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `sudo mkdir -p /glibc && sudo chown $(id -u):$(id -g) /glibc`) sets that up. Alternatively, run directly without installing:
+Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `mkdir -p ~/.local/share/pwnlibc`) sets that up. Alternatively, run directly without installing:
 
 ```bash
 pip3 install click rich
@@ -139,7 +139,7 @@ pwnlibc download 2.23 --mirror old-ubuntu      # EOL Ubuntu releases
 pwnlibc download 2.19 --arch powerpc --mirror old-ubuntu  # old powerpc
 ```
 
-Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs to `/glibc/<version>/<arch>/lib/`.
+Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs to `<glibc-dir>/<version>/<arch>/lib/`.
 
 Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`.
 
@@ -168,7 +168,7 @@ pwnlibc build 2.27 2.31 --arch arm64         # cross-compile for arm64
 pwnlibc build 2.19 --arch powerpc            # cross-compile for powerpc
 ```
 
-Creates a separate `<arch>-built` variant under `/glibc/<version>/`. This coexists with deb-installed versions — use `pwnlibc patch --variant built` to select it, or let `--variant auto` (default) pick the deb first.
+Creates a separate `<arch>-built` variant under `<glibc-dir>/<version>/`. This coexists with deb-installed versions — use `pwnlibc patch --variant built` to select it, or let `--variant auto` (default) pick the deb first.
 
 **Toolchain requirements**: The build command checks for required tools and shows the install command if anything is missing:
 
@@ -216,7 +216,7 @@ pwnlibc patch ./vuln -v 2.31 --variant built          # use source-built variant
 - `deb`: use the deb-extracted variant directly (no prompt).
 - `built`: use the source-built variant directly (no prompt).
 
-**Inplace mode** (default): Sets the ELF interpreter and RPATH to absolute paths pointing at `/glibc/<ver>/<arch>/lib/`. No files copied. The binary can be run from anywhere. GDB finds debug symbols automatically via `.debug/` in the glibc install.
+**Inplace mode** (default): Sets the ELF interpreter and RPATH to absolute paths pointing at `<glibc-dir>/<ver>/<arch>/lib/`. No files copied. The binary can be run from anywhere. GDB finds debug symbols automatically via `.debug/` in the glibc install.
 
 **Copy mode**: Copies `libc-<ver>.so`, `ld-<ver>.so`, debug symbols, and any other NEEDED libraries to the binary's directory. Patches the binary with relative paths. The binary must be run from its directory.
 
@@ -271,7 +271,7 @@ pwnlibc source download 2.27 2.35     # download multiple
 pwnlibc source remove 2.31            # remove source
 ```
 
-Source is shared across architectures at `/glibc/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Tries `.tar.xz`, `.tar.gz`, `.tar.bz2` formats from `https://ftp.gnu.org/gnu/glibc/`. Debian `.ds1` versions (e.g. `2.3.2.ds1`) map to the base GNU source (e.g. `glibc-2.3.2`).
+Source is shared across architectures at `<glibc-dir>/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Tries `.tar.xz`, `.tar.gz`, `.tar.bz2` formats from `https://ftp.gnu.org/gnu/glibc/`. Debian `.ds1` versions (e.g. `2.3.2.ds1`) map to the base GNU source (e.g. `glibc-2.3.2`).
 
 ### `pwnlibc setup ARCHIVE_DIR`
 
@@ -280,7 +280,7 @@ Extract existing `.tar.gz` archives to the glibc directory. Automatically detect
 ```bash
 pwnlibc setup ./debug_glibc                           # auto-detect variant
 pwnlibc setup ./debug_glibc --variant built            # force built variant
-pwnlibc setup /path/to/archives --target-dir /opt/glibc
+pwnlibc setup /path/to/archives --target-dir /opt/glibc   # any writable dir
 ```
 
 ### `pwnlibc info BINARY`
@@ -293,8 +293,10 @@ pwnlibc info ./vuln
 
 ## Glibc directory layout
 
+Default location: `~/.local/share/pwnlibc/` (chosen at install time; see Configuration).
+
 ```
-/glibc/
+~/.local/share/pwnlibc/
 ├── .cache/                    # downloaded .deb files
 ├── 2.23/
 │   ├── amd64/                 # from libc6 .deb (deb variant)
@@ -382,12 +384,12 @@ Handled transparently. In copy mode, libs are always renamed to `libc-<ver>.so` 
 5. Debug with GDB + source:
    ```bash
    gdb ./vuln.patched
-   # Source at /glibc/2.31/source/glibc-2.31/malloc/malloc.c
+   # Source at ~/.local/share/pwnlibc/2.31/source/glibc-2.31/malloc/malloc.c
    ```
 
 ## Configuration
 
-**Glibc directory**: Default `/glibc/`. Override with `--glibc-dir` or:
+**Glibc directory**: Default `~/.local/share/pwnlibc/`. Resolution order: `--glibc-dir` flag, `$PWNLIBC_DIR`, the config file written by `install.sh` (`~/.config/pwnlibc/glibc_dir`), then the default. Set the env var to override:
 ```bash
 export PWNLIBC_DIR=/opt/glibc
 ```

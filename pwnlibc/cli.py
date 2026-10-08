@@ -60,8 +60,8 @@ class _HelpGroup(click.Group):
 def _check_writable(glibc_dir: Path) -> None:
     if not glibc_dir.exists():
         console.print(f"[red]Glibc directory {glibc_dir} does not exist.[/red]")
-        console.print(f"[dim]Run: sudo mkdir -p {glibc_dir} && sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
-        console.print(f"[dim]Or run: bash install.sh[/dim]")
+        console.print(f"[dim]Run: mkdir -p {glibc_dir}[/dim]")
+        console.print(f"[dim]Or run: bash install.sh  (prompts for the directory once)[/dim]")
         sys.exit(1)
     if not os.access(glibc_dir, os.W_OK):
         console.print(f"[red]No write permission on {glibc_dir}.[/red]")
@@ -340,7 +340,7 @@ def available(ctx, arch, mirror, check_source):
     "-m", "--mode",
     type=click.Choice(["copy", "inplace"]),
     default="inplace",
-    help="inplace: absolute paths to /glibc/ (default). copy: libs to binary dir.",
+    help="inplace: absolute paths into the glibc dir (default). copy: libs to binary dir.",
 )
 @click.option("--variant", type=click.Choice(["deb", "built", "auto"]), default="auto",
               help="auto: prefer deb with debug symbols, prompt if unavailable. "

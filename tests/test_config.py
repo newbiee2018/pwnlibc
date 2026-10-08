@@ -97,7 +97,52 @@ class TestConstants:
             assert url.startswith("http://") or url.startswith("https://")
 
     def test_default_glibc_dir(self):
-        # Without PWNLIBC_DIR env var, defaults to /glibc
+        # Without PWNLIBC_DIR env var, resolves to a Path
         # (The actual value depends on env at import time, just check it's a Path)
         from pathlib import Path
         assert isinstance(DEFAULT_GLIBC_DIR, Path)
+
+
+class TestGlibcDirResolution:
+    """resolve_glibc_dir: $PWNLIBC_DIR > config file > ~/.local/share/pwnlibc."""
+
+    def test_env_overrides_everything(self, monkeypatch, tmp_path):
+        from pwnlibc.config import resolve_glibc_dir
+        monkeypatch.setenv("PWNLIBC_DIR", str(tmp_path / "from-env"))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        (tmp_path / ".config" / "pwnlibc").mkdir(parents=True)
+        (tmp_path / ".config" / "pwnlibc" / "glibc_dir").write_text("/from-config\n")
+        assert resolve_glibc_dir() == tmp_path / "from-env"
+
+    def test_config_file_used_when_no_env(self, monkeypatch, tmp_path):
+        from pwnlibc.config import resolve_glibc_dir
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        cfg = tmp_path / ".config" / "pwnlibc"
+        cfg.mkdir(parents=True)
+        (cfg / "glibc_dir").write_text(str(tmp_path / "chosen") + "\n")
+        assert resolve_glibc_dir() == tmp_path / "chosen"
+
+    def test_default_when_no_config(self, monkeypatch, tmp_path):
+        from pwnlibc.config import resolve_glibc_dir
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert resolve_glibc_dir() == tmp_path / ".local" / "share" / "pwnlibc"
+
+    def test_empty_config_falls_back_to_default(self, monkeypatch, tmp_path):
+        from pwnlibc.config import resolve_glibc_dir
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        cfg = tmp_path / ".config" / "pwnlibc"
+        cfg.mkdir(parents=True)
+        (cfg / "glibc_dir").write_text("   \n")
+        assert resolve_glibc_dir() == tmp_path / ".local" / "share" / "pwnlibc"
+
+    def test_blank_env_falls_through_to_config(self, monkeypatch, tmp_path):
+        from pwnlibc.config import resolve_glibc_dir
+        monkeypatch.setenv("PWNLIBC_DIR", "  ")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        cfg = tmp_path / ".config" / "pwnlibc"
+        cfg.mkdir(parents=True)
+        (cfg / "glibc_dir").write_text(str(tmp_path / "chosen") + "\n")
+        assert resolve_glibc_dir() == tmp_path / "chosen"

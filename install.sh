@@ -2,22 +2,51 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GLIBC_DIR="${PWNLIBC_DIR:-/glibc}"
 
 echo "=== pwnlibc installer ==="
 echo ""
 
-# --- Glibc directory ---
-echo "[1/2] Setting up glibc directory ($GLIBC_DIR)..."
+# --- Glibc data directory ---
+# OpenSSL-style prompt: Enter accepts the default; the choice is persisted to
+# ~/.config/pwnlibc/glibc_dir and picked up by the CLI ($PWNLIBC_DIR still
+# overrides). Setting PWNLIBC_DIR beforehand makes this step non-interactive.
+echo "[1/2] Glibc data directory (where glibc versions are stored)"
+
+DEFAULT_DIR="$HOME/.local/share/pwnlibc"
+if [ -n "$(ls -A /glibc 2>/dev/null)" ]; then
+    DEFAULT_DIR="/glibc"
+    echo "  Existing install detected at /glibc — it stays the default."
+    echo "  Enter a different path to switch (move /glibc's contents yourself),"
+    echo "  or press Enter to keep using it."
+fi
+
+if [ -n "${PWNLIBC_DIR:-}" ]; then
+    GLIBC_DIR="$PWNLIBC_DIR"
+    echo "  Using \$PWNLIBC_DIR: $GLIBC_DIR"
+else
+    read -r -e -p "Glibc directory [${DEFAULT_DIR}]: " INPUT_DIR || INPUT_DIR=""
+    GLIBC_DIR="${INPUT_DIR:-$DEFAULT_DIR}"
+    GLIBC_DIR="${GLIBC_DIR/#\~/$HOME}"   # expand a leading ~
+fi
+
 if [ -d "$GLIBC_DIR" ] && [ -w "$GLIBC_DIR" ]; then
     echo "  $GLIBC_DIR exists and is writable."
 else
-    echo "  Need root to create/fix $GLIBC_DIR."
-    echo "  (This is the only step that requires sudo.)"
-    sudo mkdir -p "$GLIBC_DIR"
-    sudo chown "$(id -u):$(id -g)" "$GLIBC_DIR"
-    echo "  Created $GLIBC_DIR (owned by $(whoami))."
+    if mkdir -p "$GLIBC_DIR" 2>/dev/null; then
+        echo "  Created $GLIBC_DIR."
+    else
+        echo "  Need root to create $GLIBC_DIR."
+        echo "  (The only step that may require sudo.)"
+        sudo mkdir -p "$GLIBC_DIR"
+        sudo chown "$(id -u):$(id -g)" "$GLIBC_DIR"
+        echo "  Created $GLIBC_DIR (owned by $(whoami))."
+    fi
 fi
+
+CONFIG_DIR_HOME="$HOME/.config/pwnlibc"
+mkdir -p "$CONFIG_DIR_HOME"
+printf '%s\n' "$GLIBC_DIR" > "$CONFIG_DIR_HOME/glibc_dir"
+echo "  Saved as default in $CONFIG_DIR_HOME/glibc_dir"
 
 # --- Install the pwnlibc command ---
 echo ""
