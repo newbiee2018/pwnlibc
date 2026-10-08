@@ -12,7 +12,7 @@ echo ""
 # overrides). Setting PWNLIBC_DIR beforehand makes this step non-interactive.
 echo "[1/2] Glibc data directory (where glibc versions are stored)"
 
-DEFAULT_DIR="$HOME/.local/share/pwnlibc"
+DEFAULT_DIR="$HOME/pwnlibc"
 if [ -n "$(ls -A /glibc 2>/dev/null)" ]; then
     DEFAULT_DIR="/glibc"
     echo "  Existing install detected at /glibc — it stays the default."
@@ -47,6 +47,26 @@ CONFIG_DIR_HOME="$HOME/.config/pwnlibc"
 mkdir -p "$CONFIG_DIR_HOME"
 printf '%s\n' "$GLIBC_DIR" > "$CONFIG_DIR_HOME/glibc_dir"
 echo "  Saved as default in $CONFIG_DIR_HOME/glibc_dir"
+
+# Retire the pre-~/pwnlibc default (~/.local/share/pwnlibc): move anything
+# installed there into the chosen directory, then remove it.
+OLD_DEFAULT="$HOME/.local/share/pwnlibc"
+if [ -d "$OLD_DEFAULT" ] && [ "$(cd "$OLD_DEFAULT" && pwd -P)" != "$(cd "$GLIBC_DIR" && pwd -P)" ]; then
+    if [ -n "$(ls -A "$OLD_DEFAULT" 2>/dev/null)" ]; then
+        echo "  Migrating $OLD_DEFAULT -> $GLIBC_DIR"
+        for item in "$OLD_DEFAULT"/* "$OLD_DEFAULT"/.[!.]*; do
+            [ -e "$item" ] || continue
+            if [ -e "$GLIBC_DIR/$(basename "$item")" ]; then
+                echo "    Skipping $(basename "$item") (already exists in $GLIBC_DIR)"
+            else
+                mv "$item" "$GLIBC_DIR/"
+            fi
+        done
+    fi
+    rmdir "$OLD_DEFAULT" 2>/dev/null \
+        && echo "  Removed old default $OLD_DEFAULT" \
+        || echo "  NOTE: $OLD_DEFAULT not empty / not removable — clean it up manually"
+fi
 
 # --- Install the pwnlibc command ---
 echo ""

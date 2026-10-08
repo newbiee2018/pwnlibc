@@ -15,7 +15,7 @@ def _config_file() -> Path:
 
 
 def _default_data_dir() -> Path:
-    return Path.home() / ".local" / "share" / "pwnlibc"
+    return Path.home() / "pwnlibc"
 
 
 def _dir_from_config() -> Path | None:
@@ -31,8 +31,7 @@ def resolve_glibc_dir() -> Path:
     """Where glibc versions live.
 
     Resolution order: $PWNLIBC_DIR, then the config file written by
-    install.sh (~/.config/pwnlibc/glibc_dir), then the default
-    ~/.local/share/pwnlibc.
+    install.sh (~/.config/pwnlibc/glibc_dir), then the default ~/pwnlibc.
     """
     env = os.environ.get(GLIBC_DIR_ENV, "").strip()
     if env:

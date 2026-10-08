@@ -23,6 +23,7 @@ from click.testing import CliRunner
 from pwnlibc.builder import build_glibc, check_build_deps
 from pwnlibc.cli import (
     _deb_version_key,
+    _ensure_writable,
     _mirrors_for_arch,
     _pkg_beats,
     _pick_best,
@@ -1146,6 +1147,28 @@ class TestScrapeMirrors:
 # ---------------------------------------------------------------------------
 # 14. setup writability / extraction
 # ---------------------------------------------------------------------------
+
+class TestEnsureWritable:
+    """Write commands auto-create a missing glibc dir instead of erroring."""
+
+    def test_missing_dir_created(self, tmp_path, capsys):
+        target = tmp_path / "fresh" / "nested" / "glibcdir"
+        _ensure_writable(target)
+        assert target.is_dir()
+        assert "Created glibc directory" in capsys.readouterr().out
+
+    def test_existing_dir_passes(self, tmp_path, capsys):
+        _ensure_writable(tmp_path)
+        assert "Created" not in capsys.readouterr().out
+
+    def test_uncreatable_dir_exits(self, tmp_path, monkeypatch, capsys):
+        from pathlib import Path as _P
+        import click
+        monkeypatch.setattr(_P, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError("EACCES")))
+        with pytest.raises(SystemExit):
+            _ensure_writable(tmp_path / "nope")
+        assert "Cannot create" in capsys.readouterr().out
+
 
 class TestSetup:
 

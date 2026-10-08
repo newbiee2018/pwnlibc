@@ -57,12 +57,15 @@ class _HelpGroup(click.Group):
         return super().parse_args(ctx, args)
 
 
-def _check_writable(glibc_dir: Path) -> None:
+def _ensure_writable(glibc_dir: Path) -> None:
     if not glibc_dir.exists():
-        console.print(f"[red]Glibc directory {glibc_dir} does not exist.[/red]")
-        console.print(f"[dim]Run: mkdir -p {glibc_dir}[/dim]")
-        console.print(f"[dim]Or run: bash install.sh  (prompts for the directory once)[/dim]")
-        sys.exit(1)
+        try:
+            glibc_dir.mkdir(parents=True)
+            console.print(f"[dim]Created glibc directory {glibc_dir}[/dim]")
+        except OSError:
+            console.print(f"[red]Cannot create glibc directory {glibc_dir}.[/red]")
+            console.print(f"[dim]Run: sudo mkdir -p {glibc_dir} && sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
+            sys.exit(1)
     if not os.access(glibc_dir, os.W_OK):
         console.print(f"[red]No write permission on {glibc_dir}.[/red]")
         console.print(f"[dim]Run: sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
@@ -670,7 +673,7 @@ def remove(ctx, versions, arch, variant, keep_cache):
       pwnlibc remove 2.27 --variant built --arch amd64
     """
     glibc_dir = ctx.obj["glibc_dir"]
-    _check_writable(glibc_dir)
+    _ensure_writable(glibc_dir)
 
     for version in versions:
         ver_dir = glibc_dir / version
@@ -808,7 +811,7 @@ def source_download(ctx, versions):
       pwnlibc source download 2.27 2.35
     """
     glibc_dir = ctx.obj["glibc_dir"]
-    _check_writable(glibc_dir)
+    _ensure_writable(glibc_dir)
 
     from .builder import check_source_available
 
@@ -845,7 +848,7 @@ def source_remove(ctx, versions):
       pwnlibc source remove 2.27 2.35
     """
     glibc_dir = ctx.obj["glibc_dir"]
-    _check_writable(glibc_dir)
+    _ensure_writable(glibc_dir)
 
     for version in versions:
         source_dir = glibc_dir / version / "source"
@@ -991,7 +994,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
       pwnlibc download 2.31 --arch arm64
     """
     glibc_dir = ctx.obj["glibc_dir"]
-    _check_writable(glibc_dir)
+    _ensure_writable(glibc_dir)
     archs_to_download = X86_ARCHES if arch == "all" else [arch]
     from .builder import check_source_available
 
@@ -1088,7 +1091,7 @@ def download_all(ctx, arch, mirror, with_dbg, check):
     """
     glibc_dir = ctx.obj["glibc_dir"]
     if not check:
-        _check_writable(glibc_dir)
+        _ensure_writable(glibc_dir)
     arches = X86_ARCHES if arch == "all" else [arch]
 
     mirrors_to_try: set[str] = set()
@@ -1171,7 +1174,7 @@ def build(ctx, versions, arch):
     from .builder import build_glibc, check_build_deps, check_source_available, get_install_cmd
 
     glibc_dir = ctx.obj["glibc_dir"]
-    _check_writable(glibc_dir)
+    _ensure_writable(glibc_dir)
 
     missing_deps = check_build_deps(arch)
     if missing_deps:
@@ -1236,7 +1239,7 @@ def verify(ctx, fix, verbose, mirror):
     """
     glibc_dir = ctx.obj["glibc_dir"]
     if fix:
-        _check_writable(glibc_dir)
+        _ensure_writable(glibc_dir)
 
     installs = [i for i in discover_installed(glibc_dir) if i.variant == "deb"]
     if not installs:
@@ -1384,7 +1387,7 @@ def setup(ctx, archive_dir, target_dir, variant):
     if target_dir is None:
         target_dir = glibc_dir
     target_dir.mkdir(parents=True, exist_ok=True)
-    _check_writable(target_dir)
+    _ensure_writable(target_dir)
 
     archives = sorted(archive_dir.glob("*.tar.gz"))
     if not archives:

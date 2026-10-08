@@ -104,7 +104,7 @@ class TestConstants:
 
 
 class TestGlibcDirResolution:
-    """resolve_glibc_dir: $PWNLIBC_DIR > config file > ~/.local/share/pwnlibc."""
+    """resolve_glibc_dir: $PWNLIBC_DIR > config file > ~/pwnlibc."""
 
     def test_env_overrides_everything(self, monkeypatch, tmp_path):
         from pwnlibc.config import resolve_glibc_dir
@@ -127,7 +127,7 @@ class TestGlibcDirResolution:
         from pwnlibc.config import resolve_glibc_dir
         monkeypatch.delenv("PWNLIBC_DIR", raising=False)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        assert resolve_glibc_dir() == tmp_path / ".local" / "share" / "pwnlibc"
+        assert resolve_glibc_dir() == tmp_path / "pwnlibc"
 
     def test_empty_config_falls_back_to_default(self, monkeypatch, tmp_path):
         from pwnlibc.config import resolve_glibc_dir
@@ -136,7 +136,7 @@ class TestGlibcDirResolution:
         cfg = tmp_path / ".config" / "pwnlibc"
         cfg.mkdir(parents=True)
         (cfg / "glibc_dir").write_text("   \n")
-        assert resolve_glibc_dir() == tmp_path / ".local" / "share" / "pwnlibc"
+        assert resolve_glibc_dir() == tmp_path / "pwnlibc"
 
     def test_blank_env_falls_through_to_config(self, monkeypatch, tmp_path):
         from pwnlibc.config import resolve_glibc_dir

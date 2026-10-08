@@ -53,14 +53,14 @@ python3 -m pip install --user --break-system-packages --editable /path/to/pwnlib
 
 The `pwnlibc` command lands in `~/.local/bin` (add it to PATH if needed). Uninstall with `python3 -m pip uninstall pwnlibc`. `bash install.sh` picks the best method automatically: pipx when present, then pip `--user` (editable), then a legacy `.pth` path-hook fallback that needs no pip at all — and it cleans up artifacts older versions of the script left behind.
 
-Or run the repo installer, which prompts for the glibc data directory once (Enter accepts `~/.local/share/pwnlibc`), persists your choice, and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
+Or run the repo installer, which prompts for the glibc data directory once (Enter accepts `~/pwnlibc`), persists your choice, and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
 
 ```bash
 cd pwnlibc/
 bash install.sh
 ```
 
-Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `mkdir -p ~/.local/share/pwnlibc`) sets that up. Alternatively, run directly without installing:
+Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `mkdir -p ~/pwnlibc`) sets that up. Alternatively, run directly without installing:
 
 ```bash
 pip3 install click rich
@@ -293,10 +293,10 @@ pwnlibc info ./vuln
 
 ## Glibc directory layout
 
-Default location: `~/.local/share/pwnlibc/` (chosen at install time; see Configuration).
+Default location: `~/pwnlibc/` (chosen at install time; see Configuration).
 
 ```
-~/.local/share/pwnlibc/
+~/pwnlibc/
 ├── .cache/                    # downloaded .deb files
 ├── 2.23/
 │   ├── amd64/                 # from libc6 .deb (deb variant)
@@ -384,12 +384,12 @@ Handled transparently. In copy mode, libs are always renamed to `libc-<ver>.so` 
 5. Debug with GDB + source:
    ```bash
    gdb ./vuln.patched
-   # Source at ~/.local/share/pwnlibc/2.31/source/glibc-2.31/malloc/malloc.c
+   # Source at ~/pwnlibc/2.31/source/glibc-2.31/malloc/malloc.c
    ```
 
 ## Configuration
 
-**Glibc directory**: Default `~/.local/share/pwnlibc/`. Resolution order: `--glibc-dir` flag, `$PWNLIBC_DIR`, the config file written by `install.sh` (`~/.config/pwnlibc/glibc_dir`), then the default. Set the env var to override:
+**Glibc directory**: Default `~/pwnlibc/`. Resolution order: `--glibc-dir` flag, `$PWNLIBC_DIR`, the config file written by `install.sh` (`~/.config/pwnlibc/glibc_dir`), then the default. Set the env var to override:
 ```bash
 export PWNLIBC_DIR=/opt/glibc
 ```
