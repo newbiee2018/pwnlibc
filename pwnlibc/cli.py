@@ -33,7 +33,6 @@ from .downloader import (
 from .elfutil import detect_arch
 from .glibc import discover_installed, get_debug_build_path, resolve_lib_paths
 from .patcher import patch_copy, patch_inplace
-from .store import InstallStore
 
 console = Console()
 
@@ -252,7 +251,6 @@ def list_cmd(ctx, arch):
     table.add_column("Version", style="bold")
     table.add_column("Arch")
     table.add_column("Variant")
-    table.add_column("Origin", style="dim")
     table.add_column("Source", justify="center")
 
     groups: dict[tuple[str, str], list] = {}
@@ -265,8 +263,7 @@ def list_cmd(ctx, arch):
         variants = " ".join(_variant_label(i) for i in arch_installs)
         has_src = any(i.has_source for i in arch_installs)
         src_str = "[green]yes[/green]" if has_src else "[dim]-[/dim]"
-        origins = " ".join(sorted({i.origin for i in arch_installs if i.origin})) or "-"
-        table.add_row(str(idx), ver, a, variants, origins, src_str)
+        table.add_row(str(idx), ver, a, variants, src_str)
         idx += 1
 
     console.print(table)
@@ -729,21 +726,18 @@ def remove(ctx, versions, arch, variant, keep_cache):
         removed_any = False
 
         arches = ALL_ARCHES if arch == "all" else [arch]
-        store = InstallStore(glibc_dir)
 
         for a in arches:
             if variant in ("deb", "all"):
                 deb_dir = ver_dir / a
                 if deb_dir.is_dir():
                     _rmtree_verbose(deb_dir, f"{a} (deb)")
-                    store.remove(version, arch=a, variant="deb")
                     removed_any = True
 
             if variant in ("built", "all"):
                 built_dir = ver_dir / f"{a}-built"
                 if built_dir.is_dir():
                     _rmtree_verbose(built_dir, f"{a}-built")
-                    store.remove(version, arch=a, variant="built")
                     removed_any = True
 
         # With --variant all + a specific --arch, other arches may still need the
@@ -753,7 +747,6 @@ def remove(ctx, versions, arch, variant, keep_cache):
             source_dir = ver_dir / "source"
             if source_dir.is_dir():
                 _rmtree_verbose(source_dir, "source")
-                store.remove_source(version)
                 removed_any = True
 
         # Auto-remove source when no deb/built remains
@@ -766,11 +759,7 @@ def remove(ctx, versions, arch, variant, keep_cache):
                 source_dir = ver_dir / "source"
                 if source_dir.is_dir():
                     _rmtree_verbose(source_dir, "source (no variants left)")
-                    store.remove_source(version)
                     removed_any = True
-
-        if removed_any:
-            store.save()
 
         if not keep_cache and variant in ("deb", "all"):
             cache_dir = glibc_dir / ".cache"
@@ -901,7 +890,6 @@ def source_remove(ctx, versions):
     """
     glibc_dir = ctx.obj["glibc_dir"]
     _ensure_writable(glibc_dir)
-    store = InstallStore(glibc_dir)
 
     for version in versions:
         source_dir = glibc_dir / version / "source"
@@ -909,8 +897,6 @@ def source_remove(ctx, versions):
             console.print(f"[yellow]{version}: no source installed[/yellow]")
             continue
         shutil.rmtree(source_dir)
-        store.remove_source(version)
-        store.save()
         console.print(f"[green]Removed source for {version}[/green]")
 
         ver_dir = glibc_dir / version
@@ -1310,41 +1296,19 @@ def verify(ctx, fix, verbose, mirror):
         console.print("[dim]No deb-installed versions to verify.[/dim]")
         return
 
-    # Prefer recorded provenance from the install database: verify checks the
-    # exact .deb that was installed, even if the mirror has superseded it
-    # since. Only unrecorded installs need the live catalog.
-    store = InstallStore(glibc_dir)
-    resolved: dict[tuple[str, str], DebPackage] = {}
-    unresolved = []
-    for inst in installs:
-        rec = store.get(inst.version, inst.arch, "deb")
-        if rec and rec.filename and rec.mirror:
-            resolved[(inst.version, inst.arch)] = DebPackage(
-                version=rec.version, full_id=rec.full_id or rec.filename[len("libc6_"):-len(".deb")],
-                arch=rec.arch, filename=rec.filename,
-                dbg_filename=rec.dbg_filename, mirror=rec.mirror,
-            )
-        else:
-            unresolved.append(inst)
+    mirrors_to_try: set[str] = set()
+    if mirror == "auto":
+        for inst in installs:
+            for m in _mirrors_for_arch(inst.arch):
+                mirrors_to_try.add(m)
+    else:
+        mirrors_to_try.add(mirror)
 
-    if unresolved:
-        mirrors_to_try: set[str] = set()
-        if mirror == "auto":
-            for inst in unresolved:
-                for m in _mirrors_for_arch(inst.arch):
-                    mirrors_to_try.add(m)
-        else:
-            mirrors_to_try.add(mirror)
-
-        console.print(f"[bold]Fetching package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim] [dim]({len(unresolved)} installs without recorded origin)[/dim]")
-        all_packages = _scrape_mirrors(mirrors_to_try)
-        if mirror == "auto":
-            all_packages = _auto_chain_only(all_packages)
-        pkg_map = _pick_best(all_packages)
-        for inst in unresolved:
-            pkg = pkg_map.get((inst.version, inst.arch))
-            if pkg is not None:
-                resolved[(inst.version, inst.arch)] = pkg
+    console.print("[bold]Fetching package lists...[/bold]")
+    all_packages = _scrape_mirrors(mirrors_to_try)
+    if mirror == "auto":
+        all_packages = _auto_chain_only(all_packages)
+    pkg_map = _pick_best(all_packages)
 
     table = Table(title="Verification results")
     table.add_column("Version")
@@ -1361,7 +1325,7 @@ def verify(ctx, fix, verbose, mirror):
 
     for inst in installs:
         key = (inst.version, inst.arch)
-        pkg = resolved.get(key)
+        pkg = pkg_map.get(key)
         if pkg is None:
             table.add_row(inst.version, inst.arch, "*", "[dim]no ref pkg[/dim]", "")
             has_rows = True
@@ -1481,7 +1445,6 @@ def setup(ctx, archive_dir, target_dir, variant):
     if not archives:
         console.print(f"[red]No .tar.gz files found in {archive_dir}[/red]")
         sys.exit(1)
-    store = InstallStore(target_dir)
 
     console.print(f"Extracting {len(archives)} archives to {target_dir}")
 
@@ -1539,13 +1502,6 @@ def setup(ctx, archive_dir, target_dir, variant):
                     continue
 
                 shutil.copytree(sub, final)
-                if arch_name in ARCH_INFO:
-                    from .store import InstallRecord
-                    store.upsert(InstallRecord(
-                        version=version, arch=arch_name, variant=detected_variant,
-                        has_dbg=detected_variant == "built",
-                    ))
-                    store.save()
 
             console.print(
                 f"  [green]{version} done[/green] "

@@ -28,8 +28,6 @@ class GlibcInstall:
     has_debug: bool
     new_naming: bool
     variant: str = "deb"  # "deb" or "built"
-    origin: str | None = None       # mirror the deb came from, per install DB
-    installed_at: str = ""          # ISO timestamp from the install DB
 
 
 def _find_libc(lib_dir: Path, version: str) -> Path | None:
@@ -98,13 +96,6 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
     if not glibc_dir.is_dir():
         return []
 
-    # The install database is the source of truth for provenance; installs
-    # not recorded there (pre-database or by hand) are adopted on sight so
-    # the database converges to the filesystem. Best-effort only.
-    from .store import InstallRecord, InstallStore
-    store = InstallStore(glibc_dir)
-    adopted = False
-
     installs = []
     for version_dir in sorted(glibc_dir.iterdir()):
         if not version_dir.is_dir() or version_dir.name.startswith("."):
@@ -113,11 +104,6 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
             parse_version(version_dir.name)
         except (ValueError, IndexError):
             continue
-
-        if (version_dir / "source").is_dir():
-            if not store.has_source(version_dir.name):
-                store.add_source(version_dir.name)
-                adopted = True
 
         for arch in ALL_ARCHES:
             # Standard deb install
@@ -135,21 +121,6 @@ def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
                     installs.append(install)
                 except FileNotFoundError:
                     pass
-
-    for install in installs:
-        record = store.get(install.version, install.arch, install.variant)
-        if record is None:
-            store.upsert(InstallRecord(
-                version=install.version, arch=install.arch, variant=install.variant,
-                has_dbg=install.has_debug,
-            ))
-            adopted = True
-        else:
-            install.origin = record.mirror
-            install.installed_at = record.installed_at
-
-    if adopted:
-        store.save()
 
     return installs
 

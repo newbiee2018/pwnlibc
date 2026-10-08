@@ -109,7 +109,7 @@ pwnlibc list                    # table of installed versions
 pwnlibc list --arch amd64       # filter by architecture
 ```
 
-Each row shows version, architecture, variant (`deb`, `deb(dbg)`, `built`, `built(dbg)`), origin (the mirror recorded at install time), and source availability.
+Each row shows version, architecture, variant (`deb`, `deb(dbg)`, `built`, `built(dbg)`), and source availability.
 
 ### `pwnlibc available`
 
@@ -386,16 +386,6 @@ Handled transparently. In copy mode, libs are always renamed to `libc-<ver>.so` 
    gdb ./vuln.patched
    # Source at ~/pwnlibc/2.31/source/glibc-2.31/malloc/malloc.c
    ```
-
-## Install database
-
-pwnlibc keeps a package database at `<glibc-dir>/.install-db.json`, maintained the way apt maintains its package lists:
-
-- `download` / `build` / `setup` **write** a record per install: the exact `.deb` filename, revision, mirror, whether debug symbols were included, and a timestamp — like `apt install` writing to the dpkg status database.
-- `remove` / `source remove` **delete** the matching records.
-- `list` (Origin column) and `verify` **read** it: `verify` checks your files against the exact `.deb` that was installed, so a mirror superseding a revision afterwards cannot cause false MISMATCH rows, and no catalog scrape is needed for recorded installs.
-
-Installs made before the database existed (or placed by hand) are adopted automatically on first sight with unknown origin (`-`), so the database converges to the filesystem without a migration step. A corrupt database file is set aside (`.bak`) and rebuilt rather than breaking commands.
 
 ## Configuration
 
