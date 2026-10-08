@@ -193,4 +193,13 @@ def build_glibc(
             if src_dir.is_dir():
                 shutil.copytree(src_dir, save_source / src_dir.name)
 
+    # Record the built variant in the install database
+    from .store import InstallRecord, InstallStore
+    store = InstallStore(glibc_dir)
+    store.upsert(InstallRecord(
+        version=version, arch=arch, variant="built", has_dbg=True,
+    ))
+    store.add_source(version)
+    store.save()
+
     return out_prefix

@@ -284,6 +284,18 @@ def download_glibc(
         _verify_deb(pkg.dbg_filename, pkg, cache_dir, "libc6-dbg")
         _extract_dbg_deb(dbg_path, out_dir, pkg.arch)
 
+    # Record the install in the database so list/verify/remove know exactly
+    # which .deb this came from, even after the mirror moves on.
+    from .store import InstallRecord, InstallStore
+    store = InstallStore(glibc_dir)
+    store.upsert(InstallRecord(
+        version=pkg.version, arch=pkg.arch, variant="deb", mirror=mirror,
+        filename=pkg.filename, full_id=pkg.full_id,
+        dbg_filename=pkg.dbg_filename if include_dbg else None,
+        has_dbg=include_dbg and bool(pkg.dbg_filename),
+    ))
+    store.save()
+
     return out_dir.parent
 
 
@@ -308,6 +320,11 @@ def download_source(version: str, glibc_dir: Path, progress_cb=None,
             ["tar", "xf", str(tarball), "-C", str(source_dir)],
             check=True, capture_output=True,
         )
+
+    from .store import InstallStore
+    store = InstallStore(glibc_dir)
+    store.add_source(version)
+    store.save()
 
     return source_dir
 
