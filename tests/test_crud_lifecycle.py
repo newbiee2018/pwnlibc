@@ -1331,3 +1331,24 @@ class TestDownloadAllDryRun:
         ])
         assert result.exit_code == 0
         assert "missing debug" in result.output.lower() or "to download" in result.output
+
+
+class TestSourceRemoveFailures:
+    """source remove must fail cleanly on permission errors, like remove."""
+
+    def test_source_remove_permission_error_clean_exit(
+            self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        (glibc_dir / "2.31" / "source").mkdir(parents=True)
+
+        with patch("pwnlibc.cli.shutil.rmtree",
+                   side_effect=PermissionError("denied")):
+            result = runner.invoke(cli, [
+                "--glibc-dir", str(glibc_dir),
+                "source", "remove", "2.31",
+            ])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Permission denied" in result.output
+        assert "chown" in result.output  # actionable hint, like `remove`

@@ -993,7 +993,13 @@ def source_remove(ctx, versions):
         if not source_dir.is_dir():
             console.print(f"[yellow]{version}: no source installed[/yellow]")
             continue
-        shutil.rmtree(source_dir)
+        try:
+            shutil.rmtree(source_dir)
+        except PermissionError:
+            # e.g. root-owned source from a past `sudo pwnlibc build`
+            console.print(f"[red]Permission denied under {glibc_dir}.[/red]")
+            console.print(f"[dim]Run: sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
+            sys.exit(1)
         console.print(f"[green]Removed source for {version}[/green]")
 
         ver_dir = glibc_dir / version
