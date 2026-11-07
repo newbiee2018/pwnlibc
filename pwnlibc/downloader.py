@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -406,6 +407,14 @@ def _miss_marker_matches(marker: Path, deb_filename: str) -> bool:
         return False
 
 
+class _IndexUnavailable(Exception):
+    """No dists index for a suite could be fetched or parsed.
+
+    Distinct from "a valid index does not list the file": an unavailable
+    index is evidence of nothing and must never be negative-cached.
+    """
+
+
 def _write_miss_marker(index_dir: Path, deb_filename: str) -> None:
     # One filename per line, so libc6 and libc6-dbg misses coexist.
     try:
@@ -423,7 +432,15 @@ def _write_miss_marker(index_dir: Path, deb_filename: str) -> None:
 
 def _suite_lookup(index_dir: Path, mirror: str, suite: str,
                   deb_arch: str, deb_filename: str) -> str | None:
-    """Search one suite's Packages index (cache-first) for deb_filename."""
+    """Search one suite's Packages index (cache-first) for deb_filename.
+
+    Returns None when the file is provably absent: a valid index parsed
+    without a hit, or the mirror answered 404 (the index does not exist —
+    e.g. EOL pockets on old-releases). Raises _IndexUnavailable when the
+    lookup was inconclusive (network errors, unparseable responses) —
+    callers must not negative-cache that.
+    """
+    absence_settled = False
     for url in _index_urls(mirror, suite, deb_arch):
         cached = index_dir / url.rsplit("/", 1)[-1]
         if cached.exists() and _cache_fresh(cached):
@@ -438,6 +455,12 @@ def _suite_lookup(index_dir: Path, mirror: str, suite: str,
                     pass
         try:
             raw = _fetch_bytes(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                absence_settled = True  # the mirror says: no such index
+            # any other HTTP status is inconclusive: fall through without
+            # settling absence, so the suite ends up _IndexUnavailable
+            continue
         except Exception:
             continue
         try:
@@ -446,40 +469,64 @@ def _suite_lookup(index_dir: Path, mirror: str, suite: str,
         except OSError:
             pass  # cache write failure is non-fatal
         try:
+            # A valid index settles the suite either way: a hit returns the
+            # sha, a miss returns None — only after this line is the file
+            # provably absent from this suite.
             return _parse_packages_sha256(raw, deb_filename)
         except (OSError, EOFError, lzma.LZMAError):
             continue
-    return None
+    if absence_settled:
+        return None
+    raise _IndexUnavailable(suite)
 
 
-def _expected_sha256(pkg: DebPackage, deb_filename: str,
-                     cache_dir: Path) -> str | None:
-    """Core lookup: expected SHA256 for one pool filename, or None when no
-    index lists it (EOL leftovers, superseded revisions)."""
+def _expected_sha256_detail(pkg: DebPackage, deb_filename: str,
+                            cache_dir: Path) -> tuple[str | None, bool]:
+    """Core lookup: (expected SHA256, index_fetch_failed).
+
+    sha is None when no index lists the file (EOL leftovers, superseded
+    revisions). index_fetch_failed is True when at least one candidate
+    suite's index could not be fetched — the caller should warn instead of
+    letting the download pass silently as "unverifiable".
+    """
     suites = _candidate_suites(pkg)
     if not suites:
-        return None
+        return None, False
     deb_arch = ARCH_INFO.get(pkg.arch, {}).get("deb_arch")
     if deb_arch is None:
-        return None
+        return None, False
 
+    settled_misses: list[str] = []  # suites with a valid index that don't list it
+    fetch_failed = False
     for suite in suites:
         index_dir = cache_dir / "indices" / pkg.mirror / suite / deb_arch
         marker = index_dir / "Packages.miss"
         if _cache_fresh(marker) and _miss_marker_matches(marker, deb_filename):
-            continue  # already known: this suite does not list the file
-        sha256 = _suite_lookup(index_dir, pkg.mirror, suite, deb_arch,
-                               deb_filename)
+            settled_misses.append(suite)  # already established genuine miss
+            continue
+        try:
+            sha256 = _suite_lookup(index_dir, pkg.mirror, suite, deb_arch,
+                                   deb_filename)
+        except _IndexUnavailable:
+            fetch_failed = True  # no marker: the network may just be down
+            continue
         if sha256 is not None:
-            return sha256
+            return sha256, False
+        settled_misses.append(suite)
 
-    # Nothing lists the file. Negative-cache per suite so repeated downloads
-    # don't refetch multi-megabyte indices for permanently unverifiable
-    # files (e.g. trusty leftovers that no dists index ever referenced).
-    for suite in suites:
+    # Only suites whose index was seen (or already cached as a miss) count:
+    # a fetched-nothing suite proves nothing and must not poison the cache
+    # for the next 7 days.
+    for suite in settled_misses:
         _write_miss_marker(
             cache_dir / "indices" / pkg.mirror / suite / deb_arch, deb_filename)
-    return None
+    return None, fetch_failed
+
+
+def _expected_sha256(pkg: DebPackage, deb_filename: str,
+                     cache_dir: Path) -> str | None:
+    """Backward-compatible wrapper around _expected_sha256_detail."""
+    return _expected_sha256_detail(pkg, deb_filename, cache_dir)[0]
 
 
 def deb_sha256_expected(pkg: DebPackage, cache_dir: Path) -> str | None:
@@ -488,16 +535,33 @@ def deb_sha256_expected(pkg: DebPackage, cache_dir: Path) -> str | None:
     return _expected_sha256(pkg, pkg.filename, cache_dir)
 
 
+def expected_sha256_status(pkg: DebPackage,
+                           cache_dir: Path) -> tuple[str | None, bool]:
+    """Like deb_sha256_expected, but also reports whether the lookup was
+    inconclusive because a dists index could not be fetched."""
+    return _expected_sha256_detail(pkg, pkg.filename, cache_dir)
+
+
 def _verify_deb(pkg_filename: str, pkg: DebPackage, cache_dir: Path,
                 label: str) -> None:
     """Verify a cached .deb against the SHA256 pinned in the dists index.
 
     Unverifiable files (no index lists them — EOL leftovers, superseded
-    revisions) are skipped by design. A mismatch deletes the file and
-    raises so callers surface it instead of extracting tampered bytes.
+    revisions) are skipped by design. When the index itself could not be
+    fetched, the skip is announced on stderr instead of passing silently.
+    A mismatch deletes the file and raises so callers surface it instead
+    of extracting tampered bytes.
     """
-    expected = _expected_sha256(pkg, pkg_filename, cache_dir)
+    expected, fetch_failed = _expected_sha256_detail(pkg, pkg_filename,
+                                                     cache_dir)
     if expected is None:
+        if fetch_failed:
+            print(
+                f"warning: could not fetch the Packages index for {label} "
+                f"{pkg_filename}; proceeding WITHOUT SHA256 verification "
+                f"this run (network failure is not cached)",
+                file=sys.stderr,
+            )
         return
     path = cache_dir / pkg_filename
     actual = sha256_file(path)

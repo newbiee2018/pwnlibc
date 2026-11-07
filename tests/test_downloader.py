@@ -734,12 +734,12 @@ class TestDownloadGlibcVerification:
         return _verify_pkg()
 
     @patch("pwnlibc.downloader._extract_deb")
-    @patch("pwnlibc.downloader._expected_sha256")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
     @patch("pwnlibc.downloader._download_file")
     def test_matching_hash_proceeds_to_extraction(
             self, mock_dl, mock_expected, mock_extract, tmp_path):
         body = b"a perfectly good deb"
-        mock_expected.return_value = hashlib.sha256(body).hexdigest()
+        mock_expected.return_value = (hashlib.sha256(body).hexdigest(), False)
         mock_dl.side_effect = _fake_download(body)
         glibc_dir = tmp_path / "glibc"
 
@@ -750,11 +750,11 @@ class TestDownloadGlibcVerification:
         assert result == glibc_dir / "2.31" / "amd64"
 
     @patch("pwnlibc.downloader._extract_deb")
-    @patch("pwnlibc.downloader._expected_sha256")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
     @patch("pwnlibc.downloader._download_file")
     def test_mismatched_hash_raises_and_deletes_deb(
             self, mock_dl, mock_expected, mock_extract, tmp_path):
-        mock_expected.return_value = hashlib.sha256(b"the real thing").hexdigest()
+        mock_expected.return_value = (hashlib.sha256(b"the real thing").hexdigest(), False)
         mock_dl.side_effect = _fake_download(b"tampered bytes")
         glibc_dir = tmp_path / "glibc"
 
@@ -765,12 +765,12 @@ class TestDownloadGlibcVerification:
         mock_extract.assert_not_called()
 
     @patch("pwnlibc.downloader._extract_deb")
-    @patch("pwnlibc.downloader._expected_sha256")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
     @patch("pwnlibc.downloader._download_file")
     @patch("pwnlibc.downloader.urllib.request.urlopen")
     def test_unverifiable_file_extracts_without_fetching(
             self, mock_urlopen, mock_dl, mock_expected, mock_extract, tmp_path):
-        mock_expected.return_value = None  # not listed in any index
+        mock_expected.return_value = (None, False)  # not listed in any index
         mock_dl.side_effect = _fake_download(b"deb bytes")
         glibc_dir = tmp_path / "glibc"
 
@@ -780,7 +780,7 @@ class TestDownloadGlibcVerification:
         mock_urlopen.assert_not_called()
 
     @patch("pwnlibc.downloader._extract_deb")
-    @patch("pwnlibc.downloader._expected_sha256")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
     @patch("pwnlibc.downloader._download_file")
     def test_cached_deb_is_verified_too(
             self, mock_dl, mock_expected, mock_extract, tmp_path):
@@ -788,7 +788,7 @@ class TestDownloadGlibcVerification:
         cached = glibc_dir / ".cache" / self._pkg().filename
         cached.parent.mkdir(parents=True)
         cached.write_bytes(b"stale tampered cache entry")
-        mock_expected.return_value = hashlib.sha256(b"legit contents").hexdigest()
+        mock_expected.return_value = (hashlib.sha256(b"legit contents").hexdigest(), False)
         mock_dl.side_effect = AssertionError("cached file must not be re-downloaded")
 
         with pytest.raises(RuntimeError, match="SHA256 mismatch"):
@@ -875,8 +875,8 @@ class TestVerifyAgainstDebSha256:
         mock_extract.side_effect = AssertionError("must not extract a bad deb")
         mock_dl.side_effect = AssertionError("cached file must not be re-downloaded")
 
-        with patch("pwnlibc.downloader._expected_sha256",
-                   return_value=hashlib.sha256(b"legit").hexdigest()):
+        with patch("pwnlibc.downloader._expected_sha256_detail",
+                   return_value=(hashlib.sha256(b"legit").hexdigest(), False)):
             with pytest.raises(RuntimeError, match="SHA256 mismatch"):
                 verify_against_deb(self._pkg(), glibc_dir)
 
@@ -885,12 +885,12 @@ class TestVerifyAgainstDebSha256:
 
     @patch("pwnlibc.downloader._extract_deb")
     @patch("pwnlibc.downloader._download_file")
-    @patch("pwnlibc.downloader._expected_sha256")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
     def test_unverifiable_deb_behaves_as_before(
             self, mock_expected, mock_dl, mock_extract, tmp_path):
         glibc_dir = tmp_path / "glibc"
         self._install(glibc_dir)
-        mock_expected.return_value = None  # no index lists it
+        mock_expected.return_value = (None, False)  # no index lists it
         mock_dl.side_effect = _fake_download(b"deb bytes")
 
         def fake_extract(deb_path, out_dir, arch):
@@ -903,13 +903,13 @@ class TestVerifyAgainstDebSha256:
 
     @patch("pwnlibc.downloader._extract_deb")
     @patch("pwnlibc.downloader._download_file")
-    @patch("pwnlibc.downloader._expected_sha256")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
     def test_matching_deb_hash_proceeds_to_content_compare(
             self, mock_expected, mock_dl, mock_extract, tmp_path):
         glibc_dir = tmp_path / "glibc"
         self._install(glibc_dir)
         body = b"deb bytes"
-        mock_expected.return_value = hashlib.sha256(body).hexdigest()
+        mock_expected.return_value = (hashlib.sha256(body).hexdigest(), False)
         mock_dl.side_effect = _fake_download(body)
 
         def fake_extract(deb_path, out_dir, arch):
@@ -918,3 +918,61 @@ class TestVerifyAgainstDebSha256:
 
         results = verify_against_deb(self._pkg(), glibc_dir)
         assert any(status == "MATCH" for _, status, _ in results)
+
+
+class TestIndexFetchFailure:
+    """I1: dists index fetch failures must not poison verification.
+
+    A network error while fetching the Packages index is NOT evidence that
+    the file is unlisted: no Packages.miss marker may be written, and the
+    caller must be able to tell "unverified due to fetch failure" apart
+    from "genuinely unlisted".
+    """
+
+    FILENAME = "libc6_2.31-0ubuntu9.18_amd64.deb"
+    OTHER = "libc6_2.35-0ubuntu3.8_amd64.deb"
+    GOOD = hashlib.sha256(b"good-deb").hexdigest()
+
+    @pytest.fixture
+    def _net_down(self, monkeypatch):
+        def boom(url):
+            raise OSError("simulated network failure")
+        monkeypatch.setattr("pwnlibc.downloader._fetch_bytes", boom)
+
+    def test_fetch_failure_returns_none_without_miss_markers(
+            self, _net_down, tmp_path):
+        assert deb_sha256_expected(_verify_pkg(), tmp_path) is None
+        assert list(tmp_path.rglob("Packages.miss")) == []
+
+    def test_fetch_failure_is_reported_via_status(
+            self, _net_down, tmp_path):
+        from pwnlibc.downloader import expected_sha256_status
+        sha, fetch_failed = expected_sha256_status(_verify_pkg(), tmp_path)
+        assert sha is None
+        assert fetch_failed is True
+
+    @patch("pwnlibc.downloader.urllib.request.urlopen")
+    def test_genuine_miss_still_negative_caches(
+            self, mock_urlopen, tmp_path):
+        index = _packages_index([(self.OTHER, "0" * 64)])
+        _serve_indices(mock_urlopen, {"Packages.xz": index})
+        assert deb_sha256_expected(_verify_pkg(), tmp_path) is None
+        assert list(tmp_path.rglob("Packages.miss"))
+
+    def test_fetch_failure_after_recovery_verifies(self, tmp_path, monkeypatch):
+        """No 7-day poison: once the network recovers, the SHA is found."""
+        import pwnlibc.downloader as dl
+        from pwnlibc.downloader import expected_sha256_status
+
+        def boom(url):
+            raise OSError("down")
+        monkeypatch.setattr(dl, "_fetch_bytes", boom)
+        sha1, failed1 = expected_sha256_status(_verify_pkg(), tmp_path)
+        assert sha1 is None and failed1 is True
+        assert list(tmp_path.rglob("Packages.miss")) == []
+
+        good_index = _packages_index(
+            [(self.OTHER, "0" * 64), (self.FILENAME, self.GOOD)])
+        monkeypatch.setattr(dl, "_fetch_bytes", lambda url: good_index)
+        sha2, failed2 = expected_sha256_status(_verify_pkg(), tmp_path)
+        assert sha2 == self.GOOD and failed2 is False

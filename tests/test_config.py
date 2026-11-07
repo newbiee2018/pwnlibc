@@ -1,6 +1,7 @@
 """Tests for pwnlibc.config — version parsing, naming conventions, constants."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -146,3 +147,64 @@ class TestGlibcDirResolution:
         cfg.mkdir(parents=True)
         (cfg / "glibc_dir").write_text(str(tmp_path / "chosen") + "\n")
         assert resolve_glibc_dir() == tmp_path / "chosen"
+
+
+class TestHomeResolution:
+    """C1: sudo runs must resolve the invoking user's home, not /root."""
+
+    def test_sudo_resolves_invoking_user_home(self, monkeypatch):
+        import getpass
+        import pwd
+        from pwnlibc import config
+
+        user = getpass.getuser()
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setenv("SUDO_USER", user)
+        monkeypatch.setenv("HOME", "/root")
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+
+        expected_home = Path(pwd.getpwnam(user).pw_dir)
+        assert config._default_data_dir() == expected_home / "pwnlibc"
+        assert config._config_file() == expected_home / ".config" / "pwnlibc" / "glibc_dir"
+
+    def test_non_root_ignores_sudo_user(self, monkeypatch):
+        from pwnlibc import config
+
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        monkeypatch.setenv("SUDO_USER", "someoneelse")
+        monkeypatch.setenv("HOME", "/home/x")
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+
+        assert config._default_data_dir() == Path("/home/x/pwnlibc")
+
+    def test_root_without_sudo_user_uses_home(self, monkeypatch):
+        from pwnlibc import config
+
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.delenv("SUDO_USER", raising=False)
+        monkeypatch.setenv("HOME", "/root")
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+
+        assert config._default_data_dir() == Path("/root/pwnlibc")
+
+
+class TestExpanduserPaths:
+    """I4: '~' in config/env values must expand, not create a literal ~ dir."""
+
+    def test_env_var_tilde_expanded(self, monkeypatch):
+        from pwnlibc import config
+
+        monkeypatch.setenv("PWNLIBC_DIR", "~/glibcs")
+        monkeypatch.setenv("HOME", "/home/x")
+        assert config.resolve_glibc_dir() == Path("/home/x/glibcs")
+
+    def test_config_file_tilde_expanded(self, monkeypatch, tmp_path):
+        from pwnlibc import config
+
+        cfg = tmp_path / "glibc_dir"
+        cfg.write_text("~/glibcs\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_config_file", lambda: cfg)
+        monkeypatch.delenv("PWNLIBC_DIR", raising=False)
+        monkeypatch.setenv("HOME", "/home/x")
+
+        assert config.resolve_glibc_dir() == Path("/home/x/glibcs")

@@ -36,8 +36,8 @@ def _no_sha256_verification(monkeypatch):
     """These tests seed fake cached .debs and mock extraction; the dists-index
     hash check would flag the bogus bytes on networked machines. Hash
     verification has its own hermetic tests in test_downloader.py."""
-    monkeypatch.setattr("pwnlibc.downloader._expected_sha256",
-                        lambda *args, **kwargs: None)
+    monkeypatch.setattr("pwnlibc.downloader._expected_sha256_detail",
+                        lambda *args, **kwargs: (None, False))
 
 
 class TestMultiArchPatterns:

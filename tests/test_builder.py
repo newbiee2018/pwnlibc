@@ -735,3 +735,73 @@ class TestLiveBuild:
     def test_very_old_version_unavailable(self):
         """Versions before ~2.3 are typically not on the mirror."""
         assert check_source_available("1.0") is None
+
+
+class TestBuildPreservesExisting:
+    """I2: a failed rebuild must not destroy the existing built variant.
+
+    The old flow rmtree'd <arch>-built before downloading/configuring;
+    any later failure left the user with nothing. The fixed flow stages
+    the install and only swaps it in after success.
+    """
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_configure_failure_preserves_existing_variant(
+            self, mock_urlopen, mock_run, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        out_prefix = glibc_dir / "2.31" / "amd64-built"
+        out_prefix.mkdir(parents=True)
+        sentinel = out_prefix / "libc.so.6"
+        sentinel.write_text("previous build")
+
+        mock_urlopen.return_value = _make_mock_urlopen()
+
+        def run_side_effect(cmd, **kwargs):
+            if cmd[0] == "tar":
+                target = Path(cmd[cmd.index("-C") + 1])
+                src_dir = target / "glibc-2.31"
+                src_dir.mkdir(parents=True, exist_ok=True)
+                (src_dir / "configure").write_text("#!/bin/sh\n")
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if str(cmd[0]).endswith("configure"):
+                return MagicMock(returncode=1, stdout="", stderr="boom")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = run_side_effect
+
+        with pytest.raises(RuntimeError):
+            build_glibc("2.31", "amd64", glibc_dir)
+
+        assert sentinel.read_text() == "previous build"
+        assert out_prefix.is_dir()
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_successful_rebuild_replaces_existing_variant(
+            self, mock_urlopen, mock_run, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        out_prefix = glibc_dir / "2.31" / "amd64-built"
+        out_prefix.mkdir(parents=True)
+        (out_prefix / "old-libc.so.6").write_text("stale")
+
+        mock_urlopen.return_value = _make_mock_urlopen()
+
+        def run_side_effect(cmd, **kwargs):
+            if cmd[0] == "tar":
+                target = Path(cmd[cmd.index("-C") + 1])
+                src_dir = target / "glibc-2.31"
+                src_dir.mkdir(parents=True, exist_ok=True)
+                (src_dir / "configure").write_text("#!/bin/sh\n")
+            elif "install" in cmd:
+                for arg in cmd:
+                    if arg.startswith("DESTDIR="):
+                        lib = Path(arg[len("DESTDIR="):]) / "lib"
+                        lib.mkdir(parents=True, exist_ok=True)
+                        (lib / "libc.so.6").write_text("fresh build")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.side_effect = run_side_effect
+
+        result = build_glibc("2.31", "amd64", glibc_dir)
+        assert result == out_prefix
+        assert (out_prefix / "lib" / "libc.so.6").read_text() == "fresh build"
+        assert not (out_prefix / "old-libc.so.6").exists()

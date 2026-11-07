@@ -77,10 +77,6 @@ def build_glibc(
     triplet = info["cross_triplet"]
     out_prefix = glibc_dir / version / f"{arch}-built"
 
-    if out_prefix.exists():
-        shutil.rmtree(out_prefix)
-    out_prefix.mkdir(parents=True)
-
     src_ver = gnu_source_version(version)
     url = check_source_available(version)
     if url is None:
@@ -88,6 +84,10 @@ def build_glibc(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
+        # Stage the install inside the temp dir and swap it into place only
+        # after the whole build succeeds, so a failed rebuild never destroys
+        # the user's existing (expensive-to-recreate) built variant.
+        install_dir = tmp / "install"
         tarball = tmp / url.rsplit("/", 1)[-1]
 
         if progress_cb:
@@ -169,7 +169,7 @@ def build_glibc(
         if progress_cb:
             progress_cb("installing", 0, 0)
         result = subprocess.run(
-            ["make", "install", f"DESTDIR={out_prefix}"],
+            ["make", "install", f"DESTDIR={install_dir}"],
             cwd=build_dir,
             env=env,
             capture_output=True,
@@ -177,7 +177,7 @@ def build_glibc(
         )
         if result.returncode != 0:
             result2 = subprocess.run(
-                ["make", f"install_root={out_prefix}", "install"],
+                ["make", f"install_root={install_dir}", "install"],
                 cwd=build_dir,
                 env=env,
                 capture_output=True,
@@ -192,5 +192,18 @@ def build_glibc(
             save_source.mkdir(parents=True, exist_ok=True)
             if src_dir.is_dir():
                 shutil.copytree(src_dir, save_source / src_dir.name)
+
+        # Whole build succeeded: swap the staged install into place (still
+        # inside the temp-dir scope — the staging dir lives there). Only now
+        # is the previous variant (if any) discarded. A make install that
+        # produced nothing (fully mocked runs) keeps the old empty-variant
+        # behavior instead of failing the swap.
+        if out_prefix.exists():
+            shutil.rmtree(out_prefix)
+        out_prefix.parent.mkdir(parents=True, exist_ok=True)
+        if install_dir.exists():
+            shutil.move(str(install_dir), str(out_prefix))
+        else:
+            out_prefix.mkdir(parents=True)
 
     return out_prefix

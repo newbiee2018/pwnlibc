@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 from pathlib import Path
 
 BACKUP_SUFFIX = ".bak"
@@ -10,12 +11,34 @@ NEW_NAMING_MIN = (2, 34)
 GLIBC_DIR_ENV = "PWNLIBC_DIR"
 
 
+def _user_home() -> Path:
+    """Home of the invoking user, sudo-aware.
+
+    Under ``sudo pwnlibc ...`` sudo resets HOME to /root, which would split
+    state between /root/pwnlibc (downloads) and ~/pwnlibc (everything else).
+    When running as root with SUDO_USER set, resolve the invoking user's
+    home instead so privileged and unprivileged commands share one tree.
+    """
+    sudo_user = os.environ.get("SUDO_USER", "").strip()
+    if (
+        sudo_user
+        and sudo_user != "root"
+        and hasattr(os, "geteuid")
+        and os.geteuid() == 0
+    ):
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except (KeyError, ValueError):
+            pass  # fall back to $HOME
+    return Path.home()
+
+
 def _config_file() -> Path:
-    return Path.home() / ".config" / "pwnlibc" / "glibc_dir"
+    return _user_home() / ".config" / "pwnlibc" / "glibc_dir"
 
 
 def _default_data_dir() -> Path:
-    return Path.home() / "pwnlibc"
+    return _user_home() / "pwnlibc"
 
 
 def _dir_from_config() -> Path | None:
@@ -24,6 +47,7 @@ def _dir_from_config() -> Path | None:
         text = _config_file().read_text(encoding="utf-8").strip()
     except OSError:
         return None
+    text = os.path.expanduser(text)
     return Path(text) if text else None
 
 
@@ -32,10 +56,11 @@ def resolve_glibc_dir() -> Path:
 
     Resolution order: $PWNLIBC_DIR, then the config file written by
     install.sh (~/.config/pwnlibc/glibc_dir), then the default ~/pwnlibc.
+    Values may use ``~``; it is expanded to the invoking user's home.
     """
     env = os.environ.get(GLIBC_DIR_ENV, "").strip()
     if env:
-        return Path(env)
+        return Path(os.path.expanduser(env))
     return _dir_from_config() or _default_data_dir()
 
 
