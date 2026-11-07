@@ -101,6 +101,9 @@ pwnlibc restore ./vuln
 sudo pwnlibc build 2.31 --arch amd64
 ```
 
+Run `pwnlibc --version` to print the tool version, `pwnlibc --help` (or
+`pwnlibc help`) for the full command list.
+
 ## Commands
 
 ### `pwnlibc list`
@@ -181,7 +184,14 @@ Build glibc from GNU source with full debug symbols (`-g3 -O1`).
 pwnlibc build 2.31 --arch amd64              # native build
 pwnlibc build 2.27 2.31 --arch arm64         # cross-compile for arm64
 pwnlibc build 2.19 --arch powerpc            # cross-compile for powerpc
+pwnlibc build 2.31 --arch amd64 --timeout 0  # no make timeout
 ```
+
+If `<glibc-dir>/<version>/source/` already holds a real source tree (one with
+a `configure` script — e.g. from `pwnlibc source download` or a previous
+build), it is reused in place and the ftp.gnu.org tarball download is skipped,
+so builds work fully offline. `--timeout SECONDS` caps the `make` step
+(default 1800; `0` disables the cap).
 
 Creates a separate `<arch>-built` variant under `<glibc-dir>/<version>/`. This coexists with deb-installed versions — use `pwnlibc patch --variant built` to select it, or let `--variant auto` (default) pick the deb first.
 
