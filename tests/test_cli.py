@@ -628,3 +628,34 @@ class TestDownloadSourcePassthrough:
         assert result.exit_code == 0
         mock_dl_source.assert_not_called()
         assert "not available on ftp.gnu.org" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Ownership repair after privileged writes / graceful remove
+# ---------------------------------------------------------------------------
+
+@patch("pwnlibc.cli.chown_tree")
+@patch("pwnlibc.cli.download_glibc")
+@patch("pwnlibc.cli._scrape_mirrors")
+def test_download_chowns_after_write(mock_scrape, mock_dl, mock_chown, tmp_path):
+    # scrape returns one 2.31/amd64 pkg (reuse the fixtures the existing
+    # download tests use); download_glibc is a MagicMock
+    mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+    mock_chown.return_value = 0  # defined int; _chown_after_write compares > 0
+    result = CliRunner().invoke(cli, [
+        "--glibc-dir", str(tmp_path),
+        "download", "2.31", "--no-source",
+    ])
+    assert result.exit_code == 0
+    mock_chown.assert_called_once_with(tmp_path)
+
+@patch("pwnlibc.cli.shutil.rmtree", side_effect=PermissionError("denied"))
+def test_remove_permission_error_prints_hint(mock_rmtree, populated_glibc_dir):
+    # populated_glibc_dir has no 2.27 — remove a version it actually has,
+    # so the rmtree PermissionError path is reached.
+    result = CliRunner().invoke(cli, [
+        "--glibc-dir", str(populated_glibc_dir),
+        "remove", "2.31",
+    ])
+    assert result.exit_code == 1
+    assert "chown" in result.output

@@ -32,6 +32,7 @@ from .downloader import (
 )
 from .elfutil import detect_arch
 from .glibc import discover_installed, get_debug_build_path, resolve_lib_paths
+from .ownership import chown_tree
 from .patcher import patch_copy, patch_inplace
 
 console = Console()
@@ -70,6 +71,14 @@ def _ensure_writable(glibc_dir: Path) -> None:
         console.print(f"[red]No write permission on {glibc_dir}.[/red]")
         console.print(f"[dim]Run: sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
         sys.exit(1)
+
+
+def _chown_after_write(glibc_dir: Path) -> None:
+    """After a possibly-privileged (sudo) write, hand the tree back to
+    SUDO_USER. No-op for unprivileged runs."""
+    changed = chown_tree(glibc_dir)
+    if changed > 0:
+        console.print(f"[dim]Repaired ownership on {changed} entries (sudo)[/dim]")
 
 
 def _mirrors_for_arch(arch: str) -> list[str]:
@@ -717,69 +726,74 @@ def remove(ctx, versions, arch, variant, keep_cache):
     _ensure_writable(glibc_dir)
 
     for version in versions:
-        ver_dir = glibc_dir / version
-        if not ver_dir.is_dir():
-            console.print(f"[red]{version}: not installed[/red]")
-            continue
+        try:
+            ver_dir = glibc_dir / version
+            if not ver_dir.is_dir():
+                console.print(f"[red]{version}: not installed[/red]")
+                continue
 
-        console.print(f"[bold]{version}:[/bold]")
-        removed_any = False
+            console.print(f"[bold]{version}:[/bold]")
+            removed_any = False
 
-        arches = ALL_ARCHES if arch == "all" else [arch]
+            arches = ALL_ARCHES if arch == "all" else [arch]
 
-        for a in arches:
-            if variant in ("deb", "all"):
-                deb_dir = ver_dir / a
-                if deb_dir.is_dir():
-                    _rmtree_verbose(deb_dir, f"{a} (deb)")
-                    removed_any = True
+            for a in arches:
+                if variant in ("deb", "all"):
+                    deb_dir = ver_dir / a
+                    if deb_dir.is_dir():
+                        _rmtree_verbose(deb_dir, f"{a} (deb)")
+                        removed_any = True
 
-            if variant in ("built", "all"):
-                built_dir = ver_dir / f"{a}-built"
-                if built_dir.is_dir():
-                    _rmtree_verbose(built_dir, f"{a}-built")
-                    removed_any = True
+                if variant in ("built", "all"):
+                    built_dir = ver_dir / f"{a}-built"
+                    if built_dir.is_dir():
+                        _rmtree_verbose(built_dir, f"{a}-built")
+                        removed_any = True
 
-        # With --variant all + a specific --arch, other arches may still need the
-        # shared source/ dir — so source only goes via the auto-removal rule below.
-        remove_source_now = variant == "source" or (variant == "all" and arch == "all")
-        if remove_source_now:
-            source_dir = ver_dir / "source"
-            if source_dir.is_dir():
-                _rmtree_verbose(source_dir, "source")
-                removed_any = True
-
-        # Auto-remove source when no deb/built remains
-        if not remove_source_now and ver_dir.is_dir():
-            has_lib = any(
-                d.is_dir() and d.name != "source" and not d.name.startswith(".")
-                for d in ver_dir.iterdir()
-            )
-            if not has_lib:
+            # With --variant all + a specific --arch, other arches may still need the
+            # shared source/ dir — so source only goes via the auto-removal rule below.
+            remove_source_now = variant == "source" or (variant == "all" and arch == "all")
+            if remove_source_now:
                 source_dir = ver_dir / "source"
                 if source_dir.is_dir():
-                    _rmtree_verbose(source_dir, "source (no variants left)")
+                    _rmtree_verbose(source_dir, "source")
                     removed_any = True
 
-        if not keep_cache and variant in ("deb", "all"):
-            cache_dir = glibc_dir / ".cache"
-            if cache_dir.is_dir():
-                # With --arch, other arches may still be installed and must
-                # keep their cached .debs — prune only that arch's files.
-                if arch == "all":
-                    cache_pattern = f"libc6*_{version}-*"
-                else:
-                    cache_pattern = f"libc6*_{version}-*_{ARCH_INFO[arch]['deb_arch']}.deb"
-                for deb_file in cache_dir.glob(cache_pattern):
-                    deb_file.unlink()
-                    console.print(f"  [dim]Removed cache: {deb_file.name}[/dim]")
+            # Auto-remove source when no deb/built remains
+            if not remove_source_now and ver_dir.is_dir():
+                has_lib = any(
+                    d.is_dir() and d.name != "source" and not d.name.startswith(".")
+                    for d in ver_dir.iterdir()
+                )
+                if not has_lib:
+                    source_dir = ver_dir / "source"
+                    if source_dir.is_dir():
+                        _rmtree_verbose(source_dir, "source (no variants left)")
+                        removed_any = True
 
-        if ver_dir.is_dir() and not any(ver_dir.iterdir()):
-            ver_dir.rmdir()
-            console.print(f"  [dim]Removed empty {version}/ directory[/dim]")
+            if not keep_cache and variant in ("deb", "all"):
+                cache_dir = glibc_dir / ".cache"
+                if cache_dir.is_dir():
+                    # With --arch, other arches may still be installed and must
+                    # keep their cached .debs — prune only that arch's files.
+                    if arch == "all":
+                        cache_pattern = f"libc6*_{version}-*"
+                    else:
+                        cache_pattern = f"libc6*_{version}-*_{ARCH_INFO[arch]['deb_arch']}.deb"
+                    for deb_file in cache_dir.glob(cache_pattern):
+                        deb_file.unlink()
+                        console.print(f"  [dim]Removed cache: {deb_file.name}[/dim]")
 
-        if not removed_any:
-            console.print(f"  [yellow]Nothing to remove for given filters[/yellow]")
+            if ver_dir.is_dir() and not any(ver_dir.iterdir()):
+                ver_dir.rmdir()
+                console.print(f"  [dim]Removed empty {version}/ directory[/dim]")
+
+            if not removed_any:
+                console.print(f"  [yellow]Nothing to remove for given filters[/yellow]")
+        except PermissionError:
+            console.print(f"[red]Permission denied under {glibc_dir}.[/red]")
+            console.print(f"[dim]Run: sudo chown $(id -u):$(id -g) {glibc_dir}[/dim]")
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +870,7 @@ def source_download(ctx, versions):
 
     from .builder import check_source_available
 
+    any_success = False
     for version in versions:
         source_dir = glibc_dir / version / "source"
         if source_dir.is_dir() and any(source_dir.iterdir()):
@@ -871,9 +886,13 @@ def source_download(ctx, versions):
 
         try:
             download_source(version, glibc_dir, url=url)
+            any_success = True
             console.print(f"  [green]{version} source installed at {source_dir}[/green]")
         except Exception as e:
             console.print(f"  [red]{version} failed: {e}[/red]")
+
+    if any_success:
+        _chown_after_write(glibc_dir)
 
 
 @source.command("remove")
@@ -1111,6 +1130,9 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                     except Exception as e:
                         console.print(f"[yellow]Source: {e}[/yellow]")
 
+    if any_success:
+        _chown_after_write(glibc_dir)
+
     if not any_success:
         sys.exit(1)
 
@@ -1189,16 +1211,21 @@ def download_all(ctx, arch, mirror, with_dbg, check):
     if check:
         return
 
+    any_success = False
     for (ver, a), pkg in sorted({**to_download, **to_add_dbg}.items(),
                                   key=lambda x: (parse_version(x[0][0]), x[0][1])):
         dl_mirror = pkg.mirror if mirror == "auto" else mirror
         is_dbg_only = (ver, a) in to_add_dbg
         try:
             download_glibc(pkg, glibc_dir, mirror=dl_mirror, include_dbg=with_dbg)
+            any_success = True
             label = "debug added" if is_dbg_only else "installed"
             console.print(f"  [green]{ver}/{a} {label}[/green] [dim]({dl_mirror})[/dim]")
         except Exception as e:
             console.print(f"  [red]{ver}/{a} failed: {e}[/red]")
+
+    if any_success:
+        _chown_after_write(glibc_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1238,6 +1265,7 @@ def build(ctx, versions, arch):
     info = ARCH_INFO[arch]
     console.print(f"[dim]Cross-compiler: {info['cross_gcc']}  triplet: {info['cross_triplet']}[/dim]")
 
+    any_success = False
     for version in versions:
         console.print(f"\n[bold]Checking source availability for {version}...[/bold]")
         if not check_source_available(version):
@@ -1268,7 +1296,11 @@ def build(ctx, versions, arch):
         if build_err:
             console.print(f"  [red]{version}/{arch} build failed: {build_err}[/red]")
         else:
+            any_success = True
             console.print(f"  [green]{version}/{arch}-built installed at {result_dir}[/green]")
+
+    if any_success:
+        _chown_after_write(glibc_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,6 +1482,7 @@ def setup(ctx, archive_dir, target_dir, variant):
 
     import tempfile
 
+    any_success = False
     for arc in archives:
         version = arc.stem.replace(".tar", "")
 
@@ -1507,6 +1540,10 @@ def setup(ctx, archive_dir, target_dir, variant):
                 f"  [green]{version} done[/green] "
                 f"[dim]({detected_variant} variant)[/dim]"
             )
+            any_success = True
+
+    if any_success:
+        _chown_after_write(target_dir)
 
     console.print("[green]Setup complete.[/green]")
 
