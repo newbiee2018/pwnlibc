@@ -161,9 +161,10 @@ pwnlibc download-all                        # all versions for amd64+i686
 pwnlibc download-all --arch arm64           # all versions for arm64
 pwnlibc download-all --arch powerpc         # all powerpc versions
 pwnlibc download-all --check                # dry run: show what would be downloaded
+pwnlibc download-all --source               # also download GNU source per version
 ```
 
-Skips versions already installed.
+Skips versions already installed. GNU source is off by default here — unlike `pwnlibc download`, where `--source` is on by default — because a bulk run would otherwise pull ~30 MB of source per version; pass `--source` to opt in.
 
 ### `pwnlibc build VERSION [VERSION ...] --arch ARCH`
 

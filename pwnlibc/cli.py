@@ -1087,6 +1087,28 @@ def source_available(ctx, versions):
 # download
 # ---------------------------------------------------------------------------
 
+def _maybe_download_source(glibc_dir: Path, version: str) -> None:
+    """Download GNU source for `version` unless it is already present.
+
+    Shared by `download` (default-on) and `download-all --source` (opt-in):
+    skip-if-present, check ftp.gnu.org availability, download, warn (never
+    raise) on unavailability or failure.
+    """
+    from .builder import check_source_available
+
+    src_dir = glibc_dir / version / "source"
+    if not src_dir.is_dir() or not any(src_dir.iterdir()):
+        console.print(f"[dim]Downloading source for {version}...[/dim]")
+        url = check_source_available(version)
+        if url is None:
+            console.print(f"[yellow]Source: not available on ftp.gnu.org for {version}[/yellow]")
+        else:
+            try:
+                download_source(version, glibc_dir, url=url)
+            except Exception as e:
+                console.print(f"[yellow]Source: {e}[/yellow]")
+
+
 @cli.command()
 @click.argument("versions", nargs=-1, required=True)
 @click.option("--arch", type=click.Choice(ALL_ARCHES + ["all"]), default="all")
@@ -1118,7 +1140,6 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
     glibc_dir = ctx.obj["glibc_dir"]
     _ensure_writable(glibc_dir)
     archs_to_download = X86_ARCHES if arch == "all" else [arch]
-    from .builder import check_source_available
 
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
@@ -1182,17 +1203,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
                 console.print(f"  [green]{version}/{pkg_arch} installed[/green] [dim]({dl_mirror})[/dim]")
 
         if source:
-            src_dir = glibc_dir / version / "source"
-            if not src_dir.is_dir() or not any(src_dir.iterdir()):
-                console.print(f"[dim]Downloading source for {version}...[/dim]")
-                url = check_source_available(version)
-                if url is None:
-                    console.print(f"[yellow]Source: not available on ftp.gnu.org for {version}[/yellow]")
-                else:
-                    try:
-                        download_source(version, glibc_dir, url=url)
-                    except Exception as e:
-                        console.print(f"[yellow]Source: {e}[/yellow]")
+            _maybe_download_source(glibc_dir, version)
 
     # Signature checks run BEFORE the ownership repair: verify content
     # first, repair ownership last.
@@ -1220,13 +1231,15 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
     default="auto",
 )
 @click.option("--with-dbg/--no-dbg", default=True)
+@click.option("--source/--no-source", default=False,
+              help="Also download GNU source (off by default — bulk runs).")
 @click.option("--check", is_flag=True, help="Dry run.")
 @click.option("--verify-signatures", is_flag=True,
               help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
 @click.option("--keyring", type=click.Path(path_type=Path), default=None,
               help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
 @click.pass_context
-def download_all(ctx, arch, mirror, with_dbg, check, verify_signatures, keyring):
+def download_all(ctx, arch, mirror, with_dbg, source, check, verify_signatures, keyring):
     """Download all available glibc versions for the given arch(es).
 
     Skips versions already installed. With --arch all, downloads amd64 + i686
@@ -1297,6 +1310,8 @@ def download_all(ctx, arch, mirror, with_dbg, check, verify_signatures, keyring)
             used_pkgs.append(pkg)
             label = "debug added" if is_dbg_only else "installed"
             console.print(f"  [green]{ver}/{a} {label}[/green] [dim]({dl_mirror})[/dim]")
+            if source:
+                _maybe_download_source(glibc_dir, ver)
         except Exception as e:
             console.print(f"  [red]{ver}/{a} failed: {e}[/red]")
 

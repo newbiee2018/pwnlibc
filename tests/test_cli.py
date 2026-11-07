@@ -816,6 +816,89 @@ class TestDownloadAllVerifySignatures:
         assert calls == ["sig", "chown"]
 
 
+class TestDownloadAllSource:
+    """Opt-in --source on download-all (download keeps its default-on)."""
+
+    URL = "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
+
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_source")
+    @patch("pwnlibc.builder.check_source_available")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_all_source_downloads_once_per_new_version(
+            self, mock_scrape, mock_dl, mock_check, mock_src, mock_chown,
+            tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [
+            _mk_pkg("2.31-0ubuntu9.16_amd64"),
+            _mk_pkg("2.35-0ubuntu3.1_amd64"),
+        ]
+        mock_chown.return_value = 0
+        mock_check.return_value = self.URL
+
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all", "--source",
+        ])
+        assert result.exit_code == 0
+        assert mock_dl.call_count == 2  # one deb per new version
+        assert mock_src.call_count == 2  # one source per new version
+        assert [c.args[0] for c in mock_src.call_args_list] == ["2.31", "2.35"]
+        assert all(c.kwargs.get("url") == self.URL
+                   for c in mock_src.call_args_list)
+
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_source")
+    @patch("pwnlibc.builder.check_source_available")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_all_source_off_by_default(
+            self, mock_scrape, mock_dl, mock_check, mock_src, mock_chown,
+            tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [
+            _mk_pkg("2.31-0ubuntu9.16_amd64"),
+            _mk_pkg("2.35-0ubuntu3.1_amd64"),
+        ]
+        mock_chown.return_value = 0
+
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all",
+        ])
+        assert result.exit_code == 0
+        assert mock_dl.call_count == 2
+        mock_src.assert_not_called()
+        mock_check.assert_not_called()
+
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_source")
+    @patch("pwnlibc.builder.check_source_available")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_all_source_runs_before_chown(
+            self, mock_scrape, mock_dl, mock_check, mock_src, mock_chown,
+            tmp_path):
+        """Source downloads are writes: they must precede the ownership repair."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_check.return_value = self.URL
+        calls = []
+        mock_src.side_effect = lambda *a, **k: calls.append("source")
+        mock_chown.side_effect = lambda d: calls.append("chown") or 0
+
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all", "--source",
+        ])
+        assert result.exit_code == 0
+        assert calls == ["source", "chown"]
+
+
 class TestVerifyCommandSignatures:
     @patch("pwnlibc.cli._run_signature_checks")
     @patch("pwnlibc.cli.verify_against_deb")
