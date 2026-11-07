@@ -1178,6 +1178,10 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
     _ensure_writable(glibc_dir)
     archs_to_download = X86_ARCHES if arch == "all" else [arch]
 
+    # Dedupe tokens up front (order-preserving): a repeated version (or a
+    # repeated `latest`) must not download or announce twice.
+    versions = list(dict.fromkeys(versions))
+
     mirrors_to_try: set[str] = set()
     if mirror == "auto":
         for a in archs_to_download:

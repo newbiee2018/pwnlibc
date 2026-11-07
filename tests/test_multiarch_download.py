@@ -573,3 +573,59 @@ class TestLiveMultiArchDownload:
         assert lib_dir.is_dir()
         assert (lib_dir / "libc.so.6").exists()
         assert (lib_dir / "ld-linux-aarch64.so.1").exists()
+
+
+class TestDownloadDuplicateTokens:
+    """Duplicate version tokens (explicit or `latest`) download once."""
+
+    @patch("pwnlibc.downloader._fetch_index")
+    @patch("pwnlibc.downloader._download_file")
+    @patch("pwnlibc.downloader._extract_deb")
+    def test_duplicate_explicit_versions_downloaded_once(
+            self, mock_extract, mock_dl, mock_fetch, runner, tmp_path):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        def fake_extract(deb_path, out_dir, arch):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "libc-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 16)
+            (out_dir / "ld-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 16)
+            (out_dir / "libc.so.6").symlink_to("libc-2.31.so")
+            (out_dir / "ld-linux-x86-64.so.2").symlink_to("ld-2.31.so")
+
+        mock_extract.side_effect = fake_extract
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "2.31", "2.31", "--arch", "amd64", "--no-dbg",
+            "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert mock_extract.call_count == 1  # not 2 (once per arch)
+        assert result.output.count("2.31/amd64 installed") == 1
+
+    @patch("pwnlibc.downloader._fetch_index")
+    @patch("pwnlibc.downloader._download_file")
+    @patch("pwnlibc.downloader._extract_deb")
+    def test_duplicate_latest_tokens_resolve_and_announce_once(
+            self, mock_extract, mock_dl, mock_fetch, runner, tmp_path):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        def fake_extract(deb_path, out_dir, arch):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "libc.so.6").write_bytes(b"\x7fELF" + b"\x00" * 16)
+            (out_dir / "ld-linux-x86-64.so.2").write_bytes(b"\x7fELF" + b"\x00" * 16)
+
+        mock_extract.side_effect = fake_extract
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "latest", "latest", "--arch", "amd64", "--no-dbg",
+            "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert result.output.count("latest (amd64)") == 1  # announced once
+        assert mock_extract.call_count == 1
