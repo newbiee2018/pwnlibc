@@ -1307,3 +1307,53 @@ class TestSignatureFailHintWording:
         assert "skipped" not in result.output
         assert "ok" in result.output
         assert "cached index was stale; refreshed" in result.output
+
+
+class TestBuildAndSourceDownloadExitSemantics:
+    """build and source download exit 1 when every version failed — the same
+    contract download/download-all already enforce (9bd2489)."""
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.builder.build_glibc")
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    @patch("pwnlibc.builder.check_build_deps", return_value=[])
+    def test_build_all_versions_skipped_exits_1(
+            self, mock_deps, mock_check, mock_build, mock_chown,
+            runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()  # no local source, nothing remote -> all skipped
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "build", "2.31", "--arch", "amd64",
+        ])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        mock_build.assert_not_called()
+        assert "source not found" in result.output
+
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    def test_source_download_all_unavailable_exits_1(
+            self, mock_check, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "source", "download", "2.31",
+        ])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "not available" in result.output
+
+    @patch("pwnlibc.builder.check_source_available")
+    def test_source_download_already_present_exits_0(
+            self, mock_check, runner, tmp_path):
+        """Idempotent no-op (source already there) stays a success."""
+        src = tmp_path / "glibc" / "2.31" / "source" / "glibc-2.31"
+        src.mkdir(parents=True)
+        (src / "configure").write_text("#!/bin/sh\n")
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(tmp_path / "glibc"),
+            "source", "download", "2.31",
+        ])
+        assert result.exit_code == 0
+        mock_check.assert_not_called()

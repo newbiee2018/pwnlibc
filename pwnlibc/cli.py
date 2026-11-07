@@ -982,10 +982,12 @@ def source_download(ctx, versions):
     from .builder import check_source_available
 
     any_success = False
+    already_present = False
     for version in versions:
         source_dir = glibc_dir / version / "source"
         if source_dir.is_dir() and any(source_dir.iterdir()):
             console.print(f"[dim]{version}: source already exists[/dim]")
+            already_present = True
             continue
 
         console.print(f"Checking {version}...", end=" ")
@@ -1004,6 +1006,10 @@ def source_download(ctx, versions):
 
     if any_success:
         _chown_after_write(glibc_dir)
+    elif not already_present:
+        # Nothing downloaded and nothing already there: mirror download's
+        # exit contract so scripts can detect the failure.
+        sys.exit(1)
 
 
 @source.command("remove")
@@ -1511,6 +1517,10 @@ def build(ctx, versions, arch, timeout):
 
     if any_success:
         _chown_after_write(glibc_dir)
+    else:
+        # Every version skipped or failed: mirror download's exit contract
+        # so scripts can detect that nothing was built.
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
