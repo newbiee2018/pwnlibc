@@ -744,7 +744,12 @@ class TestCandidateSuites:
             ["forky-updates", "forky"]
 
 
-def test_unknown_version_warns_once_on_stderr(capsys, tmp_path):
+def test_unknown_version_warns_once_on_stderr(capsys, tmp_path, monkeypatch):
+    # The once-per-version dedupe is module-global state: reset it so this
+    # test stays hermetic even when an earlier test already announced 2.99
+    # (it would otherwise silently lose its warning under session repeats).
+    import pwnlibc.downloader as _downloader
+    monkeypatch.setattr(_downloader, "_unknown_suite_versions", set())
     pkg = _verify_pkg(version="2.99", filename="libc6_2.99-1_amd64.deb")
     for _ in range(2):
         assert _expected_sha256_detail(pkg, pkg.filename, tmp_path) == (None, False)
