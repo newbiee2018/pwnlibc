@@ -1214,3 +1214,28 @@ class TestDownloadAllExitSemantics:
             "download-all",
         ])
         assert result.exit_code == 0
+
+
+class TestMaybeDownloadSourceNeverRaises:
+    """_maybe_download_source promises "warn (never raise) on unavailability
+    or failure" — an error from the availability check itself must not crash
+    the command or mislabel the deb install as failed."""
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.builder.check_source_available",
+           side_effect=OSError("network unreachable"))
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_source_check_error_never_crashes_download(
+            self, mock_fetch, mock_check, mock_dl, runner, tmp_path):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "2.31", "--arch", "amd64", "--no-dbg",
+        ])
+        assert result.exit_code == 0
+        assert result.exception is None
+        mock_dl.assert_called_once()
+        assert "network unreachable" in result.output  # surfaced as a warning

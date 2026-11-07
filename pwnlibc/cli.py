@@ -1124,16 +1124,19 @@ def _maybe_download_source(glibc_dir: Path, version: str) -> None:
     from .builder import check_source_available
 
     src_dir = glibc_dir / version / "source"
-    if not src_dir.is_dir() or not any(src_dir.iterdir()):
-        console.print(f"[dim]Downloading source for {version}...[/dim]")
+    if src_dir.is_dir() and any(src_dir.iterdir()):
+        return
+    console.print(f"[dim]Downloading source for {version}...[/dim]")
+    try:
         url = check_source_available(version)
         if url is None:
             console.print(f"[yellow]Source: not available on ftp.gnu.org for {version}[/yellow]")
-        else:
-            try:
-                download_source(version, glibc_dir, url=url)
-            except Exception as e:
-                console.print(f"[yellow]Source: {e}[/yellow]")
+            return
+        download_source(version, glibc_dir, url=url)
+    except Exception as e:
+        # Source is best-effort: a failure (even an availability-check error)
+        # must never fail the deb install it accompanies.
+        console.print(f"[yellow]Source: {e}[/yellow]")
 
 
 @cli.command()
