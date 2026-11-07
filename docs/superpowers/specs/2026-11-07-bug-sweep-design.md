@@ -56,3 +56,40 @@ for now).
 **Approach note:** each item rides the existing architecture — no new state,
 filesystem stays the single source of truth, one new module per genuinely new
 concern (`ownership.py`, `signatures.py`).
+
+## Follow-ups (from the Task-10 bug-hunt review, 2026-11-08)
+
+Larger or speculative findings from the review pass
+(`docs/superpowers/reviews/2026-11-07-bug-sweep-review.md`); none block the
+sweep's goals:
+
+1. **Atomic deb installs.** Extract libc6 and libc6-dbg into a staging dir
+   and swap into `<ver>/<arch>/lib` only after both succeed, mirroring
+   `build_glibc`'s staged install — a network death mid-dbg today leaves a
+   partial (no-debug) install that only a re-download heals.
+2. **Early patchelf check in patch's build prompt.** `_prompt_no_debug`
+   should verify `patchelf` exists before kicking off a 30-minute source
+   build that cannot be applied afterward.
+3. **Per-archive failure guard in `setup`.** Wrap each archive's extraction
+   in try/except OSError so one bad archive (disk full, permissions changed
+   mid-run) reports and continues instead of crashing the command.
+4. **Document `setup`'s skip-on-collision semantics** in the command
+   docstring and README (it silently skips already-installed variants).
+5. **Signature refresh edge:** when a fresh `.gz` matches the signed Release
+   but the cached `.xz` is stale, prefer/replace the `.xz` so the next run
+   doesn't re-fetch every time.
+6. **Release.gpg-404 degraded mode:** when InRelease is absent but Release
+   is fetchable and Release.gpg is not, still compare the cached index
+   against Release's digest entries (signature layer skipped with a note).
+7. **ESM pockets in `_candidate_suites`:** map Ubuntu Pro suites
+   (focal-esm, ...) so ESM-only revisions get SHA256 verification instead of
+   downloading as "unverifiable".
+8. **`_where_is_version` double scrape:** reuse the command's first scrape
+   (or cache per-mirror results) instead of re-scraping every untried mirror
+   to explain a missing version.
+9. **`_do_patch` source-hint probe policy:** the post-patch "source
+   available" hint does up to 9 HEAD probes with backoff (~13.5 s worst case
+   on a dead network) — skip, cache, or probe asynchronously.
+10. **Distinguish unreachable from absent in `check_source_available`**
+    (both surface as None today) so callers could warn differently; needs an
+    API change.
