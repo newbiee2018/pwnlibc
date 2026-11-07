@@ -1464,6 +1464,24 @@ class TestRestoreManifest:
         assert not manifest.exists()
         assert "copied files" not in result.output
 
+    def test_manifest_cannot_delete_non_lib_files(self, runner, tmp_path):
+        """A tampered manifest must not name arbitrary files (flag.txt,
+        Makefile, ...) in the binary's directory for deletion: only names a
+        copy-mode patch can create (lib*, ld-*, .debug/*) are honored."""
+        binary = self._make_binary(tmp_path)
+        (binary.parent / "libc-2.31.so").write_bytes(b"lib")
+        (binary.parent / "flag.txt").write_text("CTF flag — must survive")
+        (binary.parent / "notes.md").write_text("user notes — must survive")
+        manifest = self._make_manifest(
+            binary, ["flag.txt", "notes.md", "libc-2.31.so"])
+
+        result = runner.invoke(cli, ["restore", str(binary)])
+        assert result.exit_code == 0
+        assert (binary.parent / "flag.txt").exists()
+        assert (binary.parent / "notes.md").exists()
+        assert not (binary.parent / "libc-2.31.so").exists()  # sane entry honored
+        assert not manifest.exists()
+
 
 # ---------------------------------------------------------------------------
 # 16. offline-by-default is enforced, not aspirational

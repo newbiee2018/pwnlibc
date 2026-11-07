@@ -708,9 +708,18 @@ def _consume_patch_manifest(binary: Path) -> bool:
     except (OSError, ValueError):
         pass  # unreadable/corrupt manifest: nothing we can safely delete
 
+    def _patch_artifact(rel: str) -> bool:
+        # Only names a copy-mode patch can create (glibc libs land as lib*/
+        # or ld-*; debug files under .debug/). A tampered manifest naming
+        # arbitrary files (flag.txt, notes.md) in the binary's directory
+        # must not get them deleted.
+        return rel.startswith((".debug/", "lib", "ld-"))
+
     debug_dir = parent / ".debug"
     removed: list[str] = []
     for rel in entries:
+        if not _patch_artifact(rel):
+            continue
         resolved = (parent / rel).resolve()
         if resolved in (binary, manifest):
             continue
