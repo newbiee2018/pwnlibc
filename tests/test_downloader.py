@@ -21,6 +21,7 @@ from pwnlibc.downloader import (
     DebPackage,
     _candidate_suites,
     _download_file,
+    _expected_sha256_detail,
     _extract_deb,
     _extract_dbg_deb,
     _fetch_index,
@@ -568,6 +569,36 @@ class TestCandidateSuites:
 
     def test_unknown_mirror_has_no_suites(self):
         assert _candidate_suites(self._pkg("2.31", "nosuch-mirror")) == []
+
+    # Refreshed 2026-11-07: questing = Ubuntu 25.10, resolute = Ubuntu 26.04
+    # (verified via Launchpad); forky pins Debian's current glibc 2.43
+    # (verified live via dists/forky/main/binary-amd64/Packages.xz).
+    @pytest.mark.parametrize("version,suites", [
+        ("2.42", ["questing-updates", "questing-security", "questing"]),
+        ("2.43", ["resolute-updates", "resolute-security", "resolute"]),
+    ])
+    def test_current_releases_are_mapped(self, version, suites):
+        assert _candidate_suites(self._pkg(version, "ubuntu")) == suites
+
+    def test_debian_forky_mapped_for_2_43(self):
+        assert _candidate_suites(self._pkg("2.43", "debian")) == \
+            ["forky-updates", "forky"]
+
+
+def test_unknown_version_warns_once_on_stderr(capsys, tmp_path):
+    pkg = _verify_pkg(version="2.99", filename="libc6_2.99-1_amd64.deb")
+    for _ in range(2):
+        assert _expected_sha256_detail(pkg, pkg.filename, tmp_path) == (None, False)
+    err = capsys.readouterr().err
+    assert err.count("warning: no suite mapping for glibc 2.99") == 1
+
+
+@patch("pwnlibc.downloader._suite_lookup", return_value="a" * 64)
+def test_known_version_does_not_warn(mock_lookup, capsys, tmp_path):
+    pkg = _verify_pkg()  # 2.31 — suites exist, so the lookup path runs instead
+    assert _expected_sha256_detail(pkg, pkg.filename, tmp_path) == ("a" * 64, False)
+    assert "warning: no suite mapping" not in capsys.readouterr().err
+    # _suite_lookup is patched so no network is touched under the offline profile
 
 
 class TestIndexUrls:

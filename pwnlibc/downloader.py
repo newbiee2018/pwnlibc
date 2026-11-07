@@ -30,16 +30,24 @@ DBG_PATTERN = re.compile(
 _DEB_TO_PWNLIBC = {info["deb_arch"]: name for name, info in ARCH_INFO.items()}
 
 # glibc version -> Ubuntu/Debian suite whose Packages index pins it.
-# Versions/suites not listed here simply skip hash verification.
+# Versions/suites not listed here skip hash verification, announced once
+# per version by _warn_unverifiable_version so a stale map is visible.
+# 2.42/2.43 on Ubuntu verified 2026-11-07 via Launchpad; Debian's 2.43
+# verified live via dists/forky/main/binary-amd64/Packages.xz.
 _UBUNTU_SUITES = {
     "2.19": "trusty", "2.23": "xenial", "2.27": "bionic", "2.31": "focal",
     "2.35": "jammy", "2.37": "lunar", "2.38": "mantic", "2.39": "noble",
-    "2.40": "oracular", "2.41": "plucky",
+    "2.40": "oracular", "2.41": "plucky", "2.42": "questing",
+    "2.43": "resolute",
 }
 _DEBIAN_SUITES = {
     "2.24": "stretch", "2.28": "buster", "2.31": "bullseye",
-    "2.36": "bookworm", "2.41": "trixie",
+    "2.36": "bookworm", "2.41": "trixie", "2.43": "forky",
 }
+
+# glibc versions already announced as unmapped this process: the warning
+# fires once per version, not once per downloaded file.
+_unknown_suite_versions: set[str] = set()
 
 # mirror key -> package origin (shared MIRROR_FAMILY), decides the suite
 # table above. Mirrors not listed there skip hash verification entirely.
@@ -480,6 +488,24 @@ def _suite_lookup(index_dir: Path, mirror: str, suite: str,
     raise _IndexUnavailable(suite)
 
 
+def _warn_unverifiable_version(pkg: DebPackage) -> None:
+    """Announce on stderr (once per glibc version) that no suite maps it.
+
+    Without this, a suite map gone stale after a new release silently
+    degrades every download of that version to "no verification". The
+    dedupe keeps runs with many arches/files per version readable.
+    """
+    if pkg.version in _unknown_suite_versions:
+        return
+    _unknown_suite_versions.add(pkg.version)
+    print(
+        f"warning: no suite mapping for glibc {pkg.version} ({pkg.mirror}); "
+        f"downloading WITHOUT SHA256 verification — the suite map may be "
+        f"stale for new releases",
+        file=sys.stderr,
+    )
+
+
 def _expected_sha256_detail(pkg: DebPackage, deb_filename: str,
                             cache_dir: Path) -> tuple[str | None, bool]:
     """Core lookup: (expected SHA256, index_fetch_failed).
@@ -491,6 +517,7 @@ def _expected_sha256_detail(pkg: DebPackage, deb_filename: str,
     """
     suites = _candidate_suites(pkg)
     if not suites:
+        _warn_unverifiable_version(pkg)
         return None, False
     deb_arch = ARCH_INFO.get(pkg.arch, {}).get("deb_arch")
     if deb_arch is None:
