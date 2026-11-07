@@ -875,9 +875,14 @@ class TestDownloadWithSource:
     @patch("pwnlibc.downloader._download_file")
     @patch("pwnlibc.downloader._extract_deb")
     @patch("pwnlibc.downloader._extract_dbg_deb")
+    # The availability HEAD is part of the real flow; without this patch the
+    # test does live network I/O (offline-default violation — it fails when
+    # the network is down).
+    @patch("pwnlibc.builder.check_source_available",
+           return_value="https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz")
     @patch("pwnlibc.cli.download_source")
     def test_download_default_includes_source(
-        self, mock_dl_src, mock_extract_dbg, mock_extract, mock_dl_file, mock_fetch,
+        self, mock_dl_src, mock_check_src, mock_extract_dbg, mock_extract, mock_dl_file, mock_fetch,
         runner, tmp_path,
     ):
         """By default, download triggers source download."""
