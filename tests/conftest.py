@@ -10,6 +10,39 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _offline_by_default(request, monkeypatch):
+    """Enforce pytest.ini's offline-by-default policy instead of trusting it.
+
+    A bare `pytest` must not touch the network: unmarked tests that attempt a
+    real connection (or a DNS lookup) fail fast here instead of quietly
+    hitting archive.ubuntu.com / ftp.gnu.org. time.sleep is neutralized too,
+    so the blocked fetch's retry backoff cannot stall the suite. Tests that
+    mock urlopen / the fetch helpers are unaffected — only real sockets are.
+    Tests marked `network` (the -m network opt-in) are exempt entirely.
+    """
+    if request.node.get_closest_marker("network") is not None:
+        return
+
+    def _blocked(*args, **kwargs):
+        raise OSError(
+            "real network use in an unmarked test — mock the fetch "
+            "or mark the test @pytest.mark.network"
+        )
+
+    import socket
+    import time
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda *a, **k: (_ for _ in ()).throw(
+            socket.gaierror("DNS disabled in the offline test run")),
+    )
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+
 @pytest.fixture
 def tmp_glibc_dir(tmp_path):
     """Temporary glibc directory with realistic structure."""

@@ -1463,3 +1463,25 @@ class TestRestoreManifest:
         assert result.exit_code == 0
         assert not manifest.exists()
         assert "copied files" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# 16. offline-by-default is enforced, not aspirational
+# ---------------------------------------------------------------------------
+
+def test_offline_default_blocks_real_sockets():
+    """The conftest offline guard must fail any real connect in an unmarked
+    test — against a LIVE local listener too, so an unmocked fetch cannot
+    quietly reach archive.ubuntu.com / ftp.gnu.org on a networked machine."""
+    import socket
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    client = socket.socket()
+    try:
+        with pytest.raises(OSError):
+            client.connect(("127.0.0.1", srv.getsockname()[1]))
+    finally:
+        client.close()
+        srv.close()
