@@ -22,6 +22,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from . import __version__
 from .config import ALL_ARCHES, ARCH_INFO, DEFAULT_GLIBC_DIR, MIRRORS, MIRROR_FAMILY, X86_ARCHES, parse_version
 from .downloader import (
     DebPackage,
@@ -291,6 +292,7 @@ def _variant_label(inst) -> str:
 # ---------------------------------------------------------------------------
 
 @click.group(cls=_HelpGroup, invoke_without_command=True)
+@click.version_option(version=__version__, prog_name="pwnlibc")
 @click.option(
     "--glibc-dir",
     type=click.Path(path_type=Path),

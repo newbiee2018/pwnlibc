@@ -105,6 +105,12 @@ class TestCliHelp:
         assert result.exit_code == 0
 
 
+def test_version_flag():
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert "0.1.0" in result.output
+
+
 class TestCliList:
     def test_list_empty(self, runner, tmp_path):
         glibc_dir = tmp_path / "empty_glibc"
