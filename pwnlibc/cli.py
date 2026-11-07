@@ -126,10 +126,17 @@ def _run_signature_checks(pkgs: list[DebPackage], glibc_dir: Path,
             console.print(
                 f"  [red]FAIL[/red] {label} [dim]({'; '.join(check.notes + what)})[/dim]"
             )
-            console.print(
-                "  [dim]the cached index was re-fetched and still disagrees — "
-                "report this; it may be tampering or a mirror inconsistency[/dim]"
-            )
+            if check.index_sha_ok is False:
+                console.print(
+                    "  [dim]the cached index was re-fetched and still disagrees — "
+                    "report this; it may be tampering or a mirror inconsistency[/dim]"
+                )
+            else:
+                # Signature-only FAIL: no index was ever re-fetched.
+                console.print(
+                    "  [dim]the Release signature was rejected — do not trust "
+                    "this mirror's content; report this[/dim]"
+                )
         elif check.notes:
             console.print(
                 f"  [yellow]skipped[/yellow] {label} [dim]({'; '.join(check.notes)})[/dim]"

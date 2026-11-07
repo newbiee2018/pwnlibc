@@ -1239,3 +1239,48 @@ class TestMaybeDownloadSourceNeverRaises:
         assert result.exception is None
         mock_dl.assert_called_once()
         assert "network unreachable" in result.output  # surfaced as a warning
+
+
+class TestSignatureFailHintWording:
+    """A signature-only FAIL never re-fetched any index — the tampering hint
+    must not claim it did."""
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.cli.verify_index_signature")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_signature_only_fail_gets_signature_hint(
+            self, mock_scrape, mock_dl, mock_vis, mock_chown, tmp_path):
+        from pwnlibc.signatures import IndexCheck
+
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_vis.return_value = IndexCheck(
+            suite="focal", index_file=None, index_sha_ok=None,
+            signature_ok=False, notes=[])
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 1
+        assert "FAIL" in result.output
+        assert "signature was rejected" in result.output
+        assert "re-fetched" not in result.output
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.cli.verify_index_signature")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_index_mismatch_fail_keeps_refetch_hint(
+            self, mock_scrape, mock_dl, mock_vis, mock_chown, tmp_path):
+        from pwnlibc.signatures import IndexCheck
+
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_vis.return_value = IndexCheck(
+            suite="focal", index_file=None, index_sha_ok=False,
+            signature_ok=True, notes=[])
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 1
+        assert "re-fetched and still disagrees" in result.output
