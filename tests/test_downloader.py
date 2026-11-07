@@ -20,6 +20,7 @@ from pwnlibc.downloader import (
     DBG_PATTERN,
     DebPackage,
     _candidate_suites,
+    _compare_tree,
     _download_file,
     _expected_sha256_detail,
     _extract_deb,
@@ -356,6 +357,164 @@ class TestVerifyAgainstDebMirror:
         verify_against_deb(self._pkg(), glibc_dir, mirror="ubuntu")
         mock_dl.assert_called_once()
         assert mock_dl.call_args[0][0].startswith(MIRRORS["ubuntu"])
+
+    @patch("pwnlibc.downloader._extract_deb")
+    @patch("pwnlibc.downloader._download_file")
+    @patch("pwnlibc.downloader._fetch_bytes",
+           side_effect=urllib.error.URLError("offline"))
+    def test_symlink_matched_by_target_not_resolved_hash(
+            self, mock_fetch, mock_dl, mock_extract, tmp_path):
+        """Old-naming symlinks (libc.so.6 -> libc-2.19.so) MATCH by equal
+        os.readlink target, not by the resolved file's hash."""
+        glibc_dir = tmp_path / "glibc"
+        lib = glibc_dir / "2.19" / "amd64" / "lib"
+        lib.mkdir(parents=True)
+        (lib / "libc-2.19.so").write_bytes(b"real libc")
+        (lib / "libc.so.6").symlink_to("libc-2.19.so")
+
+        def fake_extract(deb_path, out_dir, arch):
+            (out_dir / "libc-2.19.so").write_bytes(b"real libc")
+            (out_dir / "libc.so.6").symlink_to("libc-2.19.so")
+        mock_extract.side_effect = fake_extract
+
+        results = verify_against_deb(self._pkg(), glibc_dir)
+
+        rows = {name: (status, detail) for name, status, detail in results}
+        assert rows["libc.so.6"][0] == "MATCH"
+        assert "libc-2.19.so" in rows["libc.so.6"][1]  # target, not a hash
+
+
+class TestCompareTree:
+    """_compare_tree: recursive ref-lib-dir vs installed-lib-dir comparison."""
+
+    @staticmethod
+    def _make_pair(tmp_path):
+        ref = tmp_path / "ref"
+        inst = tmp_path / "inst"
+        ref.mkdir()
+        inst.mkdir()
+        return ref, inst
+
+    def test_compare_tree_recurses_into_subdirs(self, tmp_path):
+        # ref has gconv/gconv-modules + gconv/ISO8859-1.so; installed lacks the .so
+        ref, inst = self._make_pair(tmp_path)
+        (ref / "gconv").mkdir()
+        (ref / "gconv" / "gconv-modules").write_bytes(b"modules")
+        (ref / "gconv" / "ISO8859-1.so").write_bytes(b"\x7fELF-gconv")
+        (inst / "gconv").mkdir()
+        (inst / "gconv" / "gconv-modules").write_bytes(b"modules")
+
+        rows = _compare_tree(ref, inst)
+
+        assert ("gconv/ISO8859-1.so", "MISSING", "") in rows
+        modules_hash = hashlib.sha256(b"modules").hexdigest()
+        assert ("gconv/gconv-modules", "MATCH", modules_hash[:16]) in rows
+
+    def test_compare_tree_symlink_target_mismatch(self, tmp_path):
+        # ref: libc.so.6 -> libc-2.31.so ; installed: libc.so.6 -> libc-2.30.so
+        ref, inst = self._make_pair(tmp_path)
+        for d in (ref, inst):
+            (d / "libc-2.31.so").write_bytes(b"real libc")
+            (d / "libc-2.30.so").write_bytes(b"old libc")
+        (ref / "libc.so.6").symlink_to("libc-2.31.so")
+        (inst / "libc.so.6").symlink_to("libc-2.30.so")
+
+        rows = _compare_tree(ref, inst)
+
+        assert any(name == "libc.so.6" and status == "MISMATCH"
+                   for name, status, _ in rows)
+
+    def test_compare_tree_symlink_target_match_is_not_a_hash(self, tmp_path):
+        """MATCH detail for a symlink carries the target string, not a hash."""
+        ref, inst = self._make_pair(tmp_path)
+        for d in (ref, inst):
+            (d / "libc-2.31.so").write_bytes(b"real libc")
+            (d / "libc.so.6").symlink_to("libc-2.31.so")
+
+        rows = dict((name, (status, detail)) for name, status, detail
+                    in _compare_tree(ref, inst))
+
+        assert rows["libc.so.6"][0] == "MATCH"
+        assert "libc-2.31.so" in rows["libc.so.6"][1]
+        assert len(rows["libc.so.6"][1]) < 64  # not a sha256 prefix
+
+    def test_compare_tree_ref_symlink_missing_on_installed(self, tmp_path):
+        ref, inst = self._make_pair(tmp_path)
+        (ref / "libc-2.31.so").write_bytes(b"real libc")
+        (ref / "libc.so.6").symlink_to("libc-2.31.so")
+        (inst / "libc-2.31.so").write_bytes(b"real libc")
+
+        rows = _compare_tree(ref, inst)
+
+        assert ("libc.so.6", "MISSING", "") in rows
+
+    def test_compare_tree_ref_symlink_installed_regular_file(self, tmp_path):
+        ref, inst = self._make_pair(tmp_path)
+        (ref / "libc-2.31.so").write_bytes(b"real libc")
+        (ref / "libc.so.6").symlink_to("libc-2.31.so")
+        (inst / "libc-2.31.so").write_bytes(b"real libc")
+        (inst / "libc.so.6").write_bytes(b"real libc")
+
+        rows = _compare_tree(ref, inst)
+
+        assert any(name == "libc.so.6" and status == "MISMATCH"
+                   for name, status, _ in rows)
+
+    def test_compare_tree_broken_installed_symlink(self, tmp_path):
+        """A dangling installed symlink is BROKEN_SYMLINK, whatever the target."""
+        ref, inst = self._make_pair(tmp_path)
+        (ref / "libc-2.31.so").write_bytes(b"real libc")
+        (ref / "libc.so.6").symlink_to("libc-2.31.so")
+        # Same target string, but the file it points at never got installed
+        (inst / "libc.so.6").symlink_to("libc-2.31.so")
+
+        rows = _compare_tree(ref, inst)
+
+        assert ("libc.so.6", "BROKEN_SYMLINK", "libc-2.31.so") in rows
+        assert ("libc-2.31.so", "MISSING", "") in rows
+
+    def test_compare_tree_file_hash_mismatch(self, tmp_path):
+        ref, inst = self._make_pair(tmp_path)
+        (ref / "libc.so.6").write_bytes(b"good")
+        (inst / "libc.so.6").write_bytes(b"evil")
+
+        rows = _compare_tree(ref, inst)
+
+        name, status, detail = rows[0]
+        assert (name, status) == ("libc.so.6", "MISMATCH")
+        assert detail == (f"expected={hashlib.sha256(b'good').hexdigest()[:16]} "
+                          f"got={hashlib.sha256(b'evil').hexdigest()[:16]}")
+
+    def test_compare_tree_ignores_debug_dir(self, tmp_path):
+        # installed has .debug/hash.debug extra; a ref-side .debug must be
+        # skipped too (it belongs to the separate libc6-dbg deb)
+        ref, inst = self._make_pair(tmp_path)
+        (ref / "libc.so.6").write_bytes(b"libc")
+        (inst / "libc.so.6").write_bytes(b"libc")
+        for d in (ref, inst):
+            (d / ".debug").mkdir()
+            (d / ".debug" / "libc-2.31.so.debug").write_bytes(b"debug")
+
+        rows = _compare_tree(ref, inst)
+
+        assert all(not name.startswith(".debug") for name, _, _ in rows)
+        assert [name for name, _, _ in rows] == ["libc.so.6"]
+
+    def test_compare_tree_rows_sorted_by_name(self, tmp_path):
+        ref, inst = self._make_pair(tmp_path)
+        # Created in an order whose os.walk sorting would differ from the
+        # final row order (root file vs subdir entries).
+        (ref / "zz_last.so").write_bytes(b"z")
+        (ref / "gconv").mkdir()
+        (ref / "gconv" / "aa_first.so").write_bytes(b"a")
+        (inst / "zz_last.so").write_bytes(b"z")
+        (inst / "gconv").mkdir()
+        (inst / "gconv" / "aa_first.so").write_bytes(b"a")
+
+        rows = _compare_tree(ref, inst)
+
+        assert [name for name, _, _ in rows] == sorted(
+            name for name, _, _ in rows)
 
 
 class TestSha256File:
@@ -949,6 +1108,35 @@ class TestVerifyAgainstDebSha256:
 
         results = verify_against_deb(self._pkg(), glibc_dir)
         assert any(status == "MATCH" for _, status, _ in results)
+
+    @patch("pwnlibc.downloader._extract_deb")
+    @patch("pwnlibc.downloader._download_file")
+    @patch("pwnlibc.downloader._expected_sha256_detail")
+    def test_verify_against_deb_reports_nested_missing(
+            self, mock_expected, mock_dl, mock_extract, tmp_path):
+        """Whole-lib-dir compare: a file missing inside a subdir (gconv/)
+        is reported, not just the top-level key files."""
+        glibc_dir = tmp_path / "glibc"
+        self._install(glibc_dir)
+        inst_gconv = glibc_dir / "2.31" / "amd64" / "lib" / "gconv"
+        inst_gconv.mkdir(parents=True)
+        (inst_gconv / "gconv-modules").write_bytes(b"modules")
+        mock_expected.return_value = (None, False)
+        mock_dl.side_effect = _fake_download(b"deb bytes")
+
+        def fake_extract(deb_path, out_dir, arch):
+            (out_dir / "libc.so.6").write_bytes(b"contents")
+            (out_dir / "gconv").mkdir()
+            (out_dir / "gconv" / "gconv-modules").write_bytes(b"modules")
+            (out_dir / "gconv" / "ISO8859-1.so").write_bytes(b"\x7fELF-gconv")
+        mock_extract.side_effect = fake_extract
+
+        results = verify_against_deb(self._pkg(), glibc_dir)
+
+        assert any(r[0] == "gconv/ISO8859-1.so" and r[1] == "MISSING"
+                   for r in results)
+        assert any(r[0] == "gconv/gconv-modules" and r[1] == "MATCH"
+                   for r in results)
 
 
 class TestIndexFetchFailure:

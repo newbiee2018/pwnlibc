@@ -247,7 +247,7 @@ Cleans up empty version directories automatically. Cached `.deb` files are remov
 
 ### `pwnlibc verify`
 
-Compare installed glibc files against official Ubuntu `.deb` packages (SHA256).
+Compare installed glibc files against official Ubuntu `.deb` packages (SHA256). Every file under the installed `lib/` is compared against the reference deb, recursively — symlinks by target, the `.debug/` dir (from the separate `libc6-dbg` package) excluded — so "All N files verified OK" covers the whole tree, not a few key files.
 
 ```bash
 pwnlibc verify                # check all deb-installed versions

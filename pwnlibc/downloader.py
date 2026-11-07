@@ -603,6 +603,77 @@ def _verify_deb(pkg_filename: str, pkg: DebPackage, cache_dir: Path,
         )
 
 
+def _compare_tree(ref_dir: Path, inst_dir: Path) -> list[tuple[str, str, str]]:
+    """Recursively compare every file under ref_dir against inst_dir.
+
+    Returns rows of (rel_path, status, detail) with `/`-separated names
+    relative to the lib root (e.g. "gconv/gconv-modules"), sorted by name
+    for deterministic output. Statuses: MATCH | MISSING | MISMATCH |
+    BROKEN_SYMLINK.
+
+    Ref symlinks must exist on the installed side as symlinks with an
+    identical os.readlink target string (MATCH); a different target or a
+    non-symlink is a MISMATCH. The `.debug/` subtree (installed by the
+    separate libc6-dbg deb) is never compared.
+    """
+    results: list[tuple[str, str, str]] = []
+
+    # os.walk, not Path.walk: the latter needs Python 3.13.
+    for root, dirs, files in os.walk(ref_dir):
+        # Prune .debug/ from the walk and keep dir order deterministic.
+        dirs[:] = sorted(d for d in dirs if d != ".debug")
+
+        # os.walk puts symlinks-to-files (and dangling ones) in `files`;
+        # symlinks-to-dirs land in `dirs` and are not descended into, so
+        # surface them here to get their readlink comparison too.
+        entries = sorted(files) + sorted(
+            d for d in dirs if (Path(root) / d).is_symlink())
+
+        for name in entries:
+            ref_path = Path(root) / name
+            rel = ref_path.relative_to(ref_dir).as_posix()
+            inst_path = inst_dir / rel
+
+            if not os.path.lexists(inst_path):
+                results.append((rel, "MISSING", ""))
+                continue
+
+            if ref_path.is_symlink():
+                # os.readlink, not Path.readlink: the latter needs Python 3.9
+                ref_target = os.readlink(ref_path)
+                if not inst_path.is_symlink():
+                    results.append(
+                        (rel, "MISMATCH", f"expected symlink to {ref_target}"))
+                elif not inst_path.resolve().exists():
+                    results.append(
+                        (rel, "BROKEN_SYMLINK", os.readlink(inst_path)))
+                else:
+                    inst_target = os.readlink(inst_path)
+                    if inst_target == ref_target:
+                        results.append((rel, "MATCH", f"symlink to {ref_target}"))
+                    else:
+                        results.append((rel, "MISMATCH",
+                                        f"expected={ref_target} got={inst_target}"))
+                continue
+
+            # Regular ref file: the installed side may still be a (valid)
+            # symlink to the same bytes; a dangling one is broken.
+            if inst_path.is_symlink() and not inst_path.resolve().exists():
+                results.append((rel, "BROKEN_SYMLINK", os.readlink(inst_path)))
+                continue
+
+            ref_hash = sha256_file(ref_path)
+            inst_hash = sha256_file(inst_path)
+            if ref_hash == inst_hash:
+                results.append((rel, "MATCH", ref_hash[:16]))
+            else:
+                results.append((rel, "MISMATCH",
+                                f"expected={ref_hash[:16]} got={inst_hash[:16]}"))
+
+    results.sort(key=lambda row: row[0])
+    return results
+
+
 def verify_against_deb(
     pkg: DebPackage,
     glibc_dir: Path,
@@ -628,44 +699,4 @@ def verify_against_deb(
         _extract_deb(deb_path, ref_dir, pkg.arch)
 
         installed_lib = glibc_dir / pkg.version / pkg.arch / "lib"
-        results = []
-
-        ld_soname = ARCH_INFO.get(pkg.arch, {}).get("ld_soname", "ld-linux-x86-64.so.2")
-        key_files = ["libc.so.6", ld_soname, "libpthread.so.0", "libm.so.6"]
-        for name in key_files:
-            ref_file = ref_dir / name
-            inst_file = installed_lib / name
-
-            if not ref_file.exists():
-                continue
-
-            # For old glibc (≤2.33), key names are symlinks to versioned files.
-            # Resolve to compare the real binaries.
-            if ref_file.is_symlink():
-                # os.readlink, not Path.readlink: the latter needs Python 3.9
-                target_name = os.readlink(ref_file)
-                ref_file = ref_dir / target_name
-                if not ref_file.exists():
-                    continue
-                inst_file = installed_lib / target_name
-
-            if not inst_file.exists():
-                results.append((name, "MISSING", ""))
-                continue
-
-            if inst_file.is_symlink():
-                target = inst_file.resolve()
-                if not target.exists():
-                    results.append((name, "BROKEN_SYMLINK", ""))
-                    continue
-                inst_file = target
-
-            ref_hash = sha256_file(ref_file)
-            inst_hash = sha256_file(inst_file)
-
-            if ref_hash == inst_hash:
-                results.append((name, "MATCH", ref_hash[:16]))
-            else:
-                results.append((name, "MISMATCH", f"expected={ref_hash[:16]} got={inst_hash[:16]}"))
-
-        return results
+        return _compare_tree(ref_dir, installed_lib)
