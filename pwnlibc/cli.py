@@ -582,7 +582,8 @@ def _prompt_no_debug(glibc_version, arch, glibc_dir, deb_install):
 
     # choice == 1: build from source
     console.print(f"\n[bold]Building glibc {glibc_version} from source...[/bold]")
-    from .builder import build_glibc, check_build_deps, check_source_available, get_install_cmd
+    from .builder import (build_glibc, check_build_deps, check_source_available,
+                          get_install_cmd, _local_source_dir)
     from rich.progress import SpinnerColumn, TextColumn
 
     missing_deps = check_build_deps(arch)
@@ -594,7 +595,9 @@ def _prompt_no_debug(glibc_version, arch, glibc_dir, deb_install):
         console.print("[yellow]Falling back to deb without debug symbols.[/yellow]")
         return deb_install
 
-    if not check_source_available(glibc_version):
+    # A usable local source tree needs no remote availability probe.
+    if _local_source_dir(glibc_dir, glibc_version) is None and \
+            not check_source_available(glibc_version):
         console.print(f"[red]Source not available on ftp.gnu.org for {glibc_version}.[/red]")
         console.print("[yellow]Falling back to deb without debug symbols.[/yellow]")
         return deb_install
@@ -1400,7 +1403,8 @@ def build(ctx, versions, arch, timeout):
 
       pwnlibc build 2.27 2.31 --arch arm64
     """
-    from .builder import build_glibc, check_build_deps, check_source_available, get_install_cmd
+    from .builder import (build_glibc, check_build_deps, check_source_available,
+                          get_install_cmd, _local_source_dir)
 
     glibc_dir = ctx.obj["glibc_dir"]
     _ensure_writable(glibc_dir)
@@ -1419,10 +1423,15 @@ def build(ctx, versions, arch, timeout):
 
     any_success = False
     for version in versions:
-        console.print(f"\n[bold]Checking source availability for {version}...[/bold]")
-        if not check_source_available(version):
-            console.print(f"[red]{version}: source not found at ftp.gnu.org. Skipping.[/red]")
-            continue
+        # A usable local source tree needs no remote probe: build_glibc
+        # reuses it in place, so a fully offline machine can build.
+        if _local_source_dir(glibc_dir, version) is not None:
+            console.print(f"\n[bold]{version}: using local source tree[/bold]")
+        else:
+            console.print(f"\n[bold]Checking source availability for {version}...[/bold]")
+            if not check_source_available(version):
+                console.print(f"[red]{version}: source not found at ftp.gnu.org. Skipping.[/red]")
+                continue
 
         out_dir = glibc_dir / version / f"{arch}-built"
         if out_dir.is_dir():

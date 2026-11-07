@@ -1094,3 +1094,82 @@ class TestVerifyCommandSignatures:
         ])
         assert result.exit_code == 0
         mock_sig.assert_not_called()
+
+
+class TestBuildOfflineLocalSource:
+    """The CLI must not gate on a remote HEAD when a local source tree works.
+
+    build_glibc reuses <glibc_dir>/<version>/source (Task 5), but the CLI
+    pre-check hit ftp.gnu.org first — a fully offline machine with local
+    source was blocked at the CLI layer.
+    """
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.builder.build_glibc")
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    @patch("pwnlibc.builder.check_build_deps", return_value=[])
+    def test_build_uses_local_source_without_remote_check(
+            self, mock_deps, mock_check, mock_build, mock_chown, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        local_src = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        local_src.mkdir(parents=True)
+        (local_src / "configure").write_text("#!/bin/sh\nexit 0\n")
+        out_dir = glibc_dir / "2.31" / "amd64-built"
+
+        def fake_build(version, arch, gdir, **kw):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            return out_dir
+
+        mock_build.side_effect = fake_build
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "build", "2.31", "--arch", "amd64",
+        ])
+        assert result.exit_code == 0
+        mock_check.assert_not_called()  # no remote HEAD needed
+        mock_build.assert_called_once()
+        assert "using local source" in result.output
+
+    @patch("pwnlibc.cli.patch_inplace")
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.builder.build_glibc")
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    @patch("pwnlibc.builder.check_build_deps", return_value=[])
+    def test_patch_prompt_build_uses_local_source_offline(
+            self, mock_deps, mock_check, mock_build, mock_chown, mock_patch,
+            runner, tmp_path):
+        """patch's build-from-source prompt hits the same remote gate."""
+        from tests.conftest import _build_minimal_elf
+        glibc_dir = tmp_path / "glibc"
+        lib_dir = glibc_dir / "2.31" / "amd64" / "lib"  # deb without debug
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "libc-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 16)
+        (lib_dir / "ld-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 16)
+        (lib_dir / "libc.so.6").symlink_to("libc-2.31.so")
+        (lib_dir / "ld-linux-x86-64.so.2").symlink_to("ld-2.31.so")
+        local_src = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        local_src.mkdir(parents=True)
+        (local_src / "configure").write_text("#!/bin/sh\nexit 0\n")
+
+        built_lib = glibc_dir / "2.31" / "amd64-built" / "lib"
+
+        def fake_build(version, arch, gdir, **kw):
+            built_lib.mkdir(parents=True, exist_ok=True)
+            (built_lib / "libc-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 16)
+            (built_lib / "ld-2.31.so").write_bytes(b"\x7fELF" + b"\x00" * 16)
+            (built_lib / "libc.so.6").symlink_to("libc-2.31.so")
+            (built_lib / "ld-linux-x86-64.so.2").symlink_to("ld-2.31.so")
+            return glibc_dir / "2.31" / "amd64-built"
+
+        mock_build.side_effect = fake_build
+        binary = _build_minimal_elf(tmp_path / "vuln", arch="amd64")
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "patch", str(binary), "-v", "2.31",
+        ], input="1\n")  # prompt: build from source
+        assert result.exit_code == 0
+        mock_build.assert_called_once()
+        mock_check.assert_not_called()
+        assert "Build complete" in result.output
