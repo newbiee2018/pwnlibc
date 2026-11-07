@@ -673,12 +673,15 @@ class TestDownloadVerifySignatures:
     def test_fail_exits_1(self, mock_scrape, mock_dl, mock_chown, mock_sig,
                           tmp_path):
         mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0  # real exit path, not a TypeError in _chown
         mock_sig.return_value = False
         result = CliRunner().invoke(cli, [
             "--glibc-dir", str(tmp_path),
             "download", "2.31", "--no-source", "--verify-signatures",
         ])
         assert result.exit_code == 1
+        # reached via sys.exit(1), not an unhandled exception
+        assert result.exception is None or isinstance(result.exception, SystemExit)
         mock_sig.assert_called_once()
         # the actually-downloaded pkg, this run's glibc dir, no explicit keyring
         pkgs, glibc_dir, keyring = mock_sig.call_args[0]
@@ -765,12 +768,15 @@ class TestDownloadAllVerifySignatures:
         glibc_dir = tmp_path / "glibc"
         glibc_dir.mkdir()
         mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0  # real exit path, not a TypeError in _chown
         mock_sig.return_value = False
         result = CliRunner().invoke(cli, [
             "--glibc-dir", str(glibc_dir),
             "download-all", "--verify-signatures",
         ])
         assert result.exit_code == 1
+        # reached via sys.exit(1), not an unhandled exception
+        assert result.exception is None or isinstance(result.exception, SystemExit)
         mock_sig.assert_called_once()
 
     @patch("pwnlibc.cli._run_signature_checks")
@@ -824,6 +830,8 @@ class TestVerifyCommandSignatures:
             "verify", "--verify-signatures",
         ])
         assert result.exit_code == 1
+        # reached via sys.exit(1), not an unhandled exception
+        assert result.exception is None or isinstance(result.exception, SystemExit)
         mock_sig.assert_called_once()
 
     @patch("pwnlibc.cli._run_signature_checks")

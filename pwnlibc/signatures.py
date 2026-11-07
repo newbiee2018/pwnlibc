@@ -14,6 +14,7 @@ is a verdict the caller turns into a failure exit.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -22,7 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import MIRROR_FAMILY
-from .downloader import _fetch_bytes, _mirror_dists_base, sha256_file
+from .downloader import (
+    _fetch_bytes,
+    _index_urls,
+    _mirror_dists_base,
+    sha256_file,
+)
 
 _UBUNTU_KEYRING = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
 _DEBIAN_KEYRING = Path("/usr/share/keyrings/debian-archive-keyring.gpg")
@@ -141,6 +147,17 @@ def verify_index_signature(mirror: str, suite: str, deb_arch: str,
         index_sha_ok: bool | None = None
     else:
         index_sha_ok = sha256_file(index_file) == expected
+        if index_sha_ok is False:
+            # Mirrors roll Packages.xz well inside the cache TTL, so a
+            # TTL-fresh cached index routinely mismatches a freshly
+            # fetched Release. Re-fetch the index once, bypassing the
+            # cache, before calling this a failure.
+            refreshed = _refresh_stale_index(mirror, suite, deb_arch, index_dir,
+                                             release_text, notes)
+            if refreshed is not None:
+                index_file = refreshed
+                index_sha_ok = True
+                notes.append("cached index was stale; refreshed")
 
     signature_ok: bool | None = None
     resolved_keyring = keyring if keyring is not None else default_keyring(mirror)
@@ -159,6 +176,43 @@ def verify_index_signature(mirror: str, suite: str, deb_arch: str,
                                    detached, notes)
 
     return IndexCheck(suite, index_file, index_sha_ok, signature_ok, notes)
+
+
+def _refresh_stale_index(mirror: str, suite: str, deb_arch: str,
+                         index_dir: Path, release_text: str,
+                         notes: list[str]) -> Path | None:
+    """One cache-bypassing re-fetch of the suite's Packages index.
+
+    Walks the same URL set the cache was built from (_index_urls). The
+    first URL whose fresh bytes hash to the digest the Release lists for
+    it replaces the cached copy (best effort — a cache write failure is
+    noted but still counts: the live index agrees with the signed
+    Release). Returns the refreshed index path, or None when every
+    re-fetch fails or still mismatches (a genuine FAIL).
+    """
+    for url in _index_urls(mirror, suite, deb_arch):
+        name = url.rsplit("/", 1)[-1]
+        try:
+            fresh = _fetch_bytes(url)
+        except Exception as exc:
+            notes.append(f"re-fetch of {name} failed: {exc}")
+            continue
+        expected = parse_release_sha256(
+            release_text, f"main/binary-{deb_arch}/{name}")
+        if expected is None or hashlib.sha256(fresh).hexdigest() != expected:
+            continue
+        target = index_dir / name
+        try:
+            index_dir.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(fresh)
+        except OSError as exc:
+            notes.append(
+                f"live {name} matches the signed Release, but updating the "
+                f"cached copy failed: {exc}"
+            )
+        return target
+    notes.append("re-fetched index still does not match the signed Release")
+    return None
 
 
 def _gpgv_check(keyring: Path, release_bytes: bytes, sig_bytes: bytes | None,

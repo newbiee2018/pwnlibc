@@ -126,8 +126,8 @@ def _run_signature_checks(pkgs: list[DebPackage], glibc_dir: Path,
                 f"  [red]FAIL[/red] {label} [dim]({'; '.join(check.notes + what)})[/dim]"
             )
             console.print(
-                "  [dim]a stale cached index can cause a mismatch; "
-                "re-running the command refreshes it[/dim]"
+                "  [dim]the cached index was re-fetched and still disagrees — "
+                "report this; it may be tampering or a mirror inconsistency[/dim]"
             )
         elif check.notes:
             console.print(

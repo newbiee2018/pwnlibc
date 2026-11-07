@@ -140,6 +140,73 @@ class TestVerifyIndexSignature:
         assert check.index_file is not None
         assert check.index_sha_ok is False
 
+    def test_stale_cached_index_refreshes_to_ok(self, tmp_path):
+        """TTL-fresh cache vs rolled index: one bypassing re-fetch fixes it.
+
+        Mirrors roll Packages.xz well inside the 7-day cache TTL, so a
+        mismatch must trigger a single re-fetch; a match refreshes the
+        cached bytes instead of failing the run.
+        """
+        from pwnlibc.downloader import _index_urls
+
+        cached = _seed_index(tmp_path, data=INDEX_XZ)  # stale bytes cached
+        fresh = INDEX_XZ + b"# rolled by the mirror\n"
+        release = _inrelease_text(index_xz=fresh)      # lists fresh digest
+        urls = []
+
+        def fetch(url):
+            urls.append(url)
+            if url.endswith("/InRelease"):
+                return release.encode()
+            if url.endswith("/Packages.xz"):
+                return fresh
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch("pwnlibc.signatures._fetch_bytes", side_effect=fetch), \
+                self._no_gpgv():
+            check = verify_index_signature("ubuntu", "focal-updates", "amd64", tmp_path)
+        # the re-fetch used the canonical index URL (cache bypassed once)
+        assert urls[1] == _index_urls("ubuntu", "focal-updates", "amd64")[0]
+        assert check.index_sha_ok is True
+        assert any("stale" in n for n in check.notes)
+        assert cached.read_bytes() == fresh  # cache actually refreshed
+
+    def test_refetch_still_mismatch_is_genuine_fail(self, tmp_path):
+        """Re-fetch also disagrees with the signed Release: genuine FAIL."""
+        cached = _seed_index(tmp_path, data=INDEX_XZ)
+        fresh = INDEX_XZ + b"# rolled by the mirror\n"
+        other = INDEX_XZ + b"# still wrong bytes\n"
+        release = _inrelease_text(index_xz=fresh)
+
+        def fetch(url):
+            if url.endswith("/InRelease"):
+                return release.encode()
+            if url.endswith("/Packages.xz"):
+                return other
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch("pwnlibc.signatures._fetch_bytes", side_effect=fetch), \
+                self._no_gpgv():
+            check = verify_index_signature("ubuntu", "focal-updates", "amd64", tmp_path)
+        assert check.index_sha_ok is False
+        assert cached.read_bytes() == INDEX_XZ  # FAIL leaves the cache alone
+
+    def test_refetch_failure_keeps_fail(self, tmp_path):
+        """Re-fetch unreachable: the mismatch stands as a genuine FAIL."""
+        _seed_index(tmp_path, data=INDEX_XZ)
+        fresh = INDEX_XZ + b"# rolled by the mirror\n"
+        release = _inrelease_text(index_xz=fresh)
+
+        def fetch(url):
+            if url.endswith("/InRelease"):
+                return release.encode()
+            raise urllib.error.URLError("down")
+
+        with patch("pwnlibc.signatures._fetch_bytes", side_effect=fetch), \
+                self._no_gpgv():
+            check = verify_index_signature("ubuntu", "focal-updates", "amd64", tmp_path)
+        assert check.index_sha_ok is False
+
     def test_no_cached_index(self, tmp_path):
         """Nothing cached: nothing to check, both verdicts None, note set."""
         with patch("pwnlibc.signatures._fetch_bytes") as mock_fetch, self._no_gpgv():
