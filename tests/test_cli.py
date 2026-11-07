@@ -1284,3 +1284,26 @@ class TestSignatureFailHintWording:
         ])
         assert result.exit_code == 1
         assert "re-fetched and still disagrees" in result.output
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.cli.verify_index_signature")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_verified_with_note_prints_ok_not_skipped(
+            self, mock_scrape, mock_dl, mock_vis, mock_chown, tmp_path):
+        """A check that actually verified (both verdicts True) but refreshed
+        a stale cached index is an ok, not a skip."""
+        from pwnlibc.signatures import IndexCheck
+
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_vis.return_value = IndexCheck(
+            suite="focal", index_file=None, index_sha_ok=True,
+            signature_ok=True, notes=["cached index was stale; refreshed"])
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+        assert "skipped" not in result.output
+        assert "ok" in result.output
+        assert "cached index was stale; refreshed" in result.output

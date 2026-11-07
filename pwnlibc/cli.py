@@ -137,12 +137,15 @@ def _run_signature_checks(pkgs: list[DebPackage], glibc_dir: Path,
                     "  [dim]the Release signature was rejected — do not trust "
                     "this mirror's content; report this[/dim]"
                 )
-        elif check.notes:
-            console.print(
-                f"  [yellow]skipped[/yellow] {label} [dim]({'; '.join(check.notes)})[/dim]"
-            )
+        elif check.index_sha_ok is True and check.signature_ok is True:
+            # Fully verified — even if a note was earned along the way
+            # (e.g. the cached index was stale and got refreshed).
+            detail = f" [dim]({'; '.join(check.notes)})[/dim]" if check.notes else ""
+            console.print(f"  [green]ok[/green] {label}{detail}")
         else:
-            console.print(f"  [green]ok[/green] {label}")
+            # At least one verdict is None — the check did not fully run.
+            detail = f" [dim]({'; '.join(check.notes)})[/dim]" if check.notes else ""
+            console.print(f"  [yellow]skipped[/yellow] {label}{detail}")
     return ok
 
 
