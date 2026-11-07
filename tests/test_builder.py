@@ -12,6 +12,7 @@ Test points:
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
+from urllib.error import HTTPError
 import os
 import shutil
 
@@ -263,6 +264,41 @@ class TestCheckSourceAvailable:
     def test_mocked_unavailable(self, mock_urlopen):
         mock_urlopen.side_effect = Exception("404 Not Found")
         assert check_source_available("9.99") is None
+
+
+class TestCheckSourceAvailableRetry:
+    """check_source_available retries transient HEAD failures (5xx, network)
+    via downloader._retry_transient, but moves to the next format at once
+    on a permanent 4xx."""
+
+    @patch("pwnlibc.builder.urllib.request.urlopen")
+    @patch("pwnlibc.downloader.time.sleep")
+    def test_head_retries_transient_5xx(self, mock_sleep, mock_open):
+        """503, 503, then success on the .xz URL: three HEADs, one result."""
+        url = GNU_SOURCE_BASE + "glibc-2.31.tar.xz"
+        mock_open.side_effect = [
+            HTTPError(url, 503, "Service Unavailable", None, None),
+            HTTPError(url, 503, "Service Unavailable", None, None),
+            MagicMock(status=200),
+        ]
+        assert check_source_available("2.31") == url
+        assert mock_open.call_count == 3
+        assert mock_sleep.call_count == 2  # linear backoff between attempts
+
+    @patch("pwnlibc.builder.urllib.request.urlopen")
+    @patch("pwnlibc.downloader.time.sleep")
+    def test_head_404_moves_to_next_format_without_retry(self, mock_sleep,
+                                                         mock_open):
+        """A 404 on .xz is permanent: no retry, straight to .gz."""
+        xz_url = GNU_SOURCE_BASE + "glibc-2.31.tar.xz"
+        gz_url = GNU_SOURCE_BASE + "glibc-2.31.tar.gz"
+        mock_open.side_effect = [
+            HTTPError(xz_url, 404, "Not Found", None, None),
+            MagicMock(status=200),
+        ]
+        assert check_source_available("2.31") == gz_url
+        assert mock_open.call_count == 2
+        mock_sleep.assert_not_called()  # 4xx must not burn backoff time
 
 
 def _make_build_run_side_effect(version):

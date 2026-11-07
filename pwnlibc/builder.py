@@ -4,10 +4,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .config import ARCH_INFO, BUILD_DEPS, GNU_SOURCE_BASE, GNU_SOURCE_FORMATS, gnu_source_version
-from .downloader import _download_file
+from .downloader import _download_file, _retry_transient
 
 
 def check_build_deps(arch: str) -> list[str]:
@@ -48,19 +50,37 @@ def get_install_cmd(arch: str) -> str:
     return "sudo apt install " + " ".join(pkgs)
 
 
+def _head_success(url: str) -> bool:
+    """Single HEAD probe of url. True when the URL exists, False on a
+    permanent 4xx (the format is absent from the mirror).
+
+    5xx and network errors (URLError/timeout/OSError) propagate so
+    _retry_transient can retry them — a transient 503 must not be mistaken
+    for "source unavailable". Stateless and thread-safe.
+    """
+    req = urllib.request.Request(url, method="HEAD",
+                                 headers={"User-Agent": "pwnlibc/0.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            return False
+        raise
+
+
 def check_source_available(version: str) -> str | None:
     """Check ftp.gnu.org for source. Returns URL if found, None otherwise.
 
     Tries .tar.xz, .tar.gz, .tar.bz2. Handles .ds1 versions (2.3.2.ds1 → 2.3.2).
+    Transient failures (5xx, connection blips) are retried per format via
+    _retry_transient; a 4xx means the format is absent and moves on at once.
     """
-    import urllib.request
     src_ver = gnu_source_version(version)
     for fmt in GNU_SOURCE_FORMATS:
         url = GNU_SOURCE_BASE + fmt.format(version=src_ver)
         try:
-            req = urllib.request.Request(url, method="HEAD",
-                                         headers={"User-Agent": "pwnlibc/0.1"})
-            with urllib.request.urlopen(req, timeout=10):
+            if _retry_transient(lambda: _head_success(url)):
                 return url
         except Exception:
             continue
