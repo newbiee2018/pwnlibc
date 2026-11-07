@@ -352,8 +352,8 @@ def _candidate_suites(pkg: DebPackage) -> list[str]:
     return []
 
 
-def _index_urls(mirror: str, suite: str, deb_arch: str) -> list[str]:
-    """Packages index URLs for one suite: .xz first, .gz fallback.
+def _mirror_dists_base(mirror: str) -> str:
+    """HTTPS base of the mirror's dists tree (host root before /pool/).
 
     The dists tree hangs off the same host as the pool; the base is forced
     to https so hash metadata is never fetched over plain http even while
@@ -366,6 +366,12 @@ def _index_urls(mirror: str, suite: str, deb_arch: str) -> list[str]:
         base = pool_url.rstrip("/")
     if base.startswith("http://"):
         base = "https://" + base[len("http://"):]
+    return base
+
+
+def _index_urls(mirror: str, suite: str, deb_arch: str) -> list[str]:
+    """Packages index URLs for one suite: .xz first, .gz fallback."""
+    base = _mirror_dists_base(mirror)
     path = f"/dists/{suite}/main/binary-{deb_arch}/Packages"
     return [base + path + ".xz", base + path + ".gz"]
 

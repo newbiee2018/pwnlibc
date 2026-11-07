@@ -145,6 +145,13 @@ Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu
 
 Integrity: every downloaded `.deb` is checked against the SHA256 recorded in the owning suite's `Packages` index (`<mirror>/dists/<suite>/main/binary-<arch>/Packages.xz`); a mismatch deletes the file and aborts that version. Indices are cached under `<glibc-dir>/.cache/indices/` for 7 days. Files no index lists (EOL leftovers like trusty-era debs, or superseded revisions) are downloaded without verification. All mirrors are fetched over HTTPS.
 
+Signature verification (opt-in): `--verify-signatures` adds a layer above the deb hashes — after the run, each cached `Packages` index it used is compared against the SHA256 listed in the suite's GPG-signed `InRelease` (or `Release` + `Release.gpg`) file, which is itself verified with `gpgv` against the distro archive keyring. Requires `gpgv` (`sudo apt install gnupg`) and a keyring (`ubuntu-archive-keyring` / `debian-archive-keyring`, or `--keyring PATH`, or `$PWNLIBC_KEYRING`); a missing tool or keyring only downgrades that check to a warning, but an actual index/signature mismatch exits with status 1.
+
+```bash
+pwnlibc download 2.31 --verify-signatures              # also check the signed Release
+pwnlibc download 2.31 --verify-signatures --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg
+```
+
 ### `pwnlibc download-all`
 
 Download all available glibc versions for specified architecture(s).
@@ -256,6 +263,12 @@ pwnlibc verify --fix          # re-download mismatched/missing files
 ```
 
 Only verifies `deb` variant installs (not source-built ones). By default only shows problems (MISSING/MISMATCH); use `-v` to see all entries. Exits with status 1 when problems are found (or, with `--fix`, when a fix attempt fails) so scripts and CI can detect failures. The cached reference `.deb` is also validated against the dists SHA256 before file contents are compared — a tampered or truncated cache entry is reported as an error (and removed) instead of silently producing MISMATCH rows; when no index pins the deb, verification falls back to content comparison as before.
+
+`--verify-signatures` (opt-in) additionally checks each `Packages` index used against the GPG-signed `InRelease`/`Release` of its suite (`gpgv` + distro archive keyring; see `pwnlibc download`). Missing `gpgv`/keyring downgrades the check to a warning; an index hash or signature mismatch makes `verify` exit 1 like any other problem. `--keyring PATH` selects the trusted keyring (`$PWNLIBC_KEYRING` also works).
+
+```bash
+pwnlibc verify --verify-signatures      # also check signed Release files
+```
 
 ### `pwnlibc source`
 

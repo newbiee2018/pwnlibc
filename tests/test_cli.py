@@ -659,3 +659,197 @@ def test_remove_permission_error_prints_hint(mock_rmtree, populated_glibc_dir):
     ])
     assert result.exit_code == 1
     assert "chown" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Opt-in --verify-signatures wiring
+# ---------------------------------------------------------------------------
+
+class TestDownloadVerifySignatures:
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_fail_exits_1(self, mock_scrape, mock_dl, mock_chown, mock_sig,
+                          tmp_path):
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_sig.return_value = False
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 1
+        mock_sig.assert_called_once()
+        # the actually-downloaded pkg, this run's glibc dir, no explicit keyring
+        pkgs, glibc_dir, keyring = mock_sig.call_args[0]
+        assert [p.full_id for p in pkgs] == ["2.31-0ubuntu9.16_amd64"]
+        assert glibc_dir == tmp_path
+        assert keyring is None
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_clean_exits_0(self, mock_scrape, mock_dl, mock_chown, mock_sig,
+                           tmp_path):
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0
+        mock_sig.return_value = True
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+        mock_sig.assert_called_once()
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_off_by_default(self, mock_scrape, mock_dl, mock_chown, mock_sig,
+                            tmp_path):
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source",
+        ])
+        assert result.exit_code == 0
+        mock_sig.assert_not_called()
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_keyring_passed_through(self, mock_scrape, mock_dl, mock_chown,
+                                    mock_sig, tmp_path):
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0
+        mock_sig.return_value = True
+        kr = tmp_path / "kr.gpg"
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+            "--keyring", str(kr),
+        ])
+        assert result.exit_code == 0
+        assert mock_sig.call_args[0][2] == kr
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_runs_before_chown(self, mock_scrape, mock_dl, mock_chown,
+                               mock_sig, tmp_path):
+        """Binding placement ruling: content is verified, ownership repaired last."""
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0
+        calls = []
+        mock_sig.side_effect = lambda *a: calls.append("sig") or True
+        mock_chown.side_effect = lambda d: calls.append("chown") or 0
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+        assert calls == ["sig", "chown"]
+
+
+class TestDownloadAllVerifySignatures:
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_fail_exits_1(self, mock_scrape, mock_dl, mock_chown, mock_sig,
+                          tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_sig.return_value = False
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all", "--verify-signatures",
+        ])
+        assert result.exit_code == 1
+        mock_sig.assert_called_once()
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_clean_exits_0(self, mock_scrape, mock_dl, mock_chown, mock_sig,
+                           tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        mock_chown.return_value = 0
+        mock_sig.return_value = True
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.chown_tree")
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_runs_before_chown(self, mock_scrape, mock_dl, mock_chown,
+                               mock_sig, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        calls = []
+        mock_sig.side_effect = lambda *a: calls.append("sig") or True
+        mock_chown.side_effect = lambda d: calls.append("chown") or 0
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+        assert calls == ["sig", "chown"]
+
+
+class TestVerifyCommandSignatures:
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_sig_failure_exits_1_even_when_files_match(
+            self, mock_fetch, mock_verify, mock_sig, runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MATCH", "deadbeefdeadbeef")]
+        mock_sig.return_value = False
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(populated_glibc_dir),
+            "verify", "--verify-signatures",
+        ])
+        assert result.exit_code == 1
+        mock_sig.assert_called_once()
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_clean_exits_0(
+            self, mock_fetch, mock_verify, mock_sig, runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MATCH", "deadbeefdeadbeef")]
+        mock_sig.return_value = True
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(populated_glibc_dir),
+            "verify", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+
+    @patch("pwnlibc.cli._run_signature_checks")
+    @patch("pwnlibc.cli.verify_against_deb")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_off_by_default(
+            self, mock_fetch, mock_verify, mock_sig, runner, populated_glibc_dir):
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        mock_verify.return_value = [("libc.so.6", "MATCH", "deadbeefdeadbeef")]
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(populated_glibc_dir),
+            "verify",
+        ])
+        assert result.exit_code == 0
+        mock_sig.assert_not_called()

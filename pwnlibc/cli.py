@@ -25,6 +25,7 @@ from rich.table import Table
 from .config import ALL_ARCHES, ARCH_INFO, DEFAULT_GLIBC_DIR, MIRRORS, MIRROR_FAMILY, X86_ARCHES, parse_version
 from .downloader import (
     DebPackage,
+    _candidate_suites,
     download_glibc,
     download_source,
     scrape_available,
@@ -34,6 +35,7 @@ from .elfutil import detect_arch
 from .glibc import discover_installed, get_debug_build_path, resolve_lib_paths
 from .ownership import chown_tree
 from .patcher import patch_copy, patch_inplace
+from .signatures import verify_index_signature
 
 console = Console()
 
@@ -79,6 +81,61 @@ def _chown_after_write(glibc_dir: Path) -> None:
     changed = chown_tree(glibc_dir)
     if changed > 0:
         console.print(f"[dim]Repaired ownership on {changed} entries (sudo)[/dim]")
+
+
+def _run_signature_checks(pkgs: list[DebPackage], glibc_dir: Path,
+                          keyring: Path | None) -> bool:
+    """Opt-in post-run layer: check each cached Packages index this run
+    used against the GPG-signed InRelease/Release of its suite.
+
+    (mirror, suite, deb_arch) triples are deduped via _candidate_suites per
+    package; one line is printed per suite. Returns True when everything
+    checked out or only degraded to warnings (skips); False when at least
+    one index hash or Release signature check outright failed.
+    """
+    cache_dir = glibc_dir / ".cache"
+    triples: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for pkg in pkgs:
+        deb_arch = ARCH_INFO.get(pkg.arch, {}).get("deb_arch")
+        if deb_arch is None:
+            continue
+        for suite in _candidate_suites(pkg):
+            triple = (pkg.mirror, suite, deb_arch)
+            if triple not in seen:
+                seen.add(triple)
+                triples.append(triple)
+
+    if not triples:
+        return True
+
+    console.print(f"[bold]Verifying Packages indices against signed Release files"
+                  f"[/bold] [dim]({len(triples)} suite indices)[/dim]")
+    ok = True
+    for mirror, suite, deb_arch in triples:
+        check = verify_index_signature(mirror, suite, deb_arch, cache_dir, keyring)
+        label = f"{mirror} {suite} {deb_arch}"
+        if check.index_sha_ok is False or check.signature_ok is False:
+            ok = False
+            what = []
+            if check.index_sha_ok is False:
+                what.append("cached index does not match the signed Release")
+            if check.signature_ok is False:
+                what.append("gpgv rejected the Release signature")
+            console.print(
+                f"  [red]FAIL[/red] {label} [dim]({'; '.join(check.notes + what)})[/dim]"
+            )
+            console.print(
+                "  [dim]a stale cached index can cause a mismatch; "
+                "re-running the command refreshes it[/dim]"
+            )
+        elif check.notes:
+            console.print(
+                f"  [yellow]skipped[/yellow] {label} [dim]({'; '.join(check.notes)})[/dim]"
+            )
+        else:
+            console.print(f"  [green]ok[/green] {label}")
+    return ok
 
 
 def _mirrors_for_arch(arch: str) -> list[str]:
@@ -1041,8 +1098,13 @@ def source_available(ctx, versions):
 )
 @click.option("--with-dbg/--no-dbg", default=True, help="Include debug symbols.")
 @click.option("--source/--no-source", default=True, help="Download GNU source for GDB debugging.")
+@click.option("--verify-signatures", is_flag=True,
+              help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
+@click.option("--keyring", type=click.Path(path_type=Path), default=None,
+              help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
 @click.pass_context
-def download(ctx, versions, arch, mirror, with_dbg, source):
+def download(ctx, versions, arch, mirror, with_dbg, source,
+             verify_signatures, keyring):
     """Download one or more glibc versions.
 
     Examples:
@@ -1071,6 +1133,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
     chain_packages = _auto_chain_only(all_packages) if mirror == "auto" else all_packages
 
     any_success = False
+    used_pkgs: list[DebPackage] = []
     for version in versions:
         matching = [
             p for p in chain_packages
@@ -1115,6 +1178,7 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                     continue
 
                 any_success = True
+                used_pkgs.append(pkg)
                 console.print(f"  [green]{version}/{pkg_arch} installed[/green] [dim]({dl_mirror})[/dim]")
 
         if source:
@@ -1130,10 +1194,16 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
                     except Exception as e:
                         console.print(f"[yellow]Source: {e}[/yellow]")
 
+    # Signature checks run BEFORE the ownership repair: verify content
+    # first, repair ownership last.
+    sig_ok = True
+    if verify_signatures and used_pkgs:
+        sig_ok = _run_signature_checks(used_pkgs, glibc_dir, keyring)
+
     if any_success:
         _chown_after_write(glibc_dir)
 
-    if not any_success:
+    if not any_success or not sig_ok:
         sys.exit(1)
 
 
@@ -1151,8 +1221,12 @@ def download(ctx, versions, arch, mirror, with_dbg, source):
 )
 @click.option("--with-dbg/--no-dbg", default=True)
 @click.option("--check", is_flag=True, help="Dry run.")
+@click.option("--verify-signatures", is_flag=True,
+              help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
+@click.option("--keyring", type=click.Path(path_type=Path), default=None,
+              help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
 @click.pass_context
-def download_all(ctx, arch, mirror, with_dbg, check):
+def download_all(ctx, arch, mirror, with_dbg, check, verify_signatures, keyring):
     """Download all available glibc versions for the given arch(es).
 
     Skips versions already installed. With --arch all, downloads amd64 + i686
@@ -1212,6 +1286,7 @@ def download_all(ctx, arch, mirror, with_dbg, check):
         return
 
     any_success = False
+    used_pkgs: list[DebPackage] = []
     for (ver, a), pkg in sorted({**to_download, **to_add_dbg}.items(),
                                   key=lambda x: (parse_version(x[0][0]), x[0][1])):
         dl_mirror = pkg.mirror if mirror == "auto" else mirror
@@ -1219,13 +1294,23 @@ def download_all(ctx, arch, mirror, with_dbg, check):
         try:
             download_glibc(pkg, glibc_dir, mirror=dl_mirror, include_dbg=with_dbg)
             any_success = True
+            used_pkgs.append(pkg)
             label = "debug added" if is_dbg_only else "installed"
             console.print(f"  [green]{ver}/{a} {label}[/green] [dim]({dl_mirror})[/dim]")
         except Exception as e:
             console.print(f"  [red]{ver}/{a} failed: {e}[/red]")
 
+    # Signature checks run BEFORE the ownership repair: verify content
+    # first, repair ownership last.
+    sig_ok = True
+    if verify_signatures and used_pkgs:
+        sig_ok = _run_signature_checks(used_pkgs, glibc_dir, keyring)
+
     if any_success:
         _chown_after_write(glibc_dir)
+
+    if not sig_ok:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1311,8 +1396,12 @@ def build(ctx, versions, arch):
 @click.option("--fix", is_flag=True, help="Re-download and replace mismatched files.")
 @click.option("--verbose", "-v", is_flag=True, help="Show MATCH entries too.")
 @click.option("--mirror", type=click.Choice(ALL_MIRRORS), default="auto")
+@click.option("--verify-signatures", is_flag=True,
+              help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
+@click.option("--keyring", type=click.Path(path_type=Path), default=None,
+              help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
 @click.pass_context
-def verify(ctx, fix, verbose, mirror):
+def verify(ctx, fix, verbose, mirror, verify_signatures, keyring):
     """Verify installed glibc against official Ubuntu packages.
 
     Exits with status 1 when problems (MISSING/MISMATCH/errors) are found,
@@ -1350,6 +1439,7 @@ def verify(ctx, fix, verbose, mirror):
     table.add_column("Details")
 
     versions_to_fix = []
+    used_pkgs: list[DebPackage] = []
     match_count = 0
     problem_count = 0
     fix_failed = 0
@@ -1363,6 +1453,7 @@ def verify(ctx, fix, verbose, mirror):
             has_rows = True
             continue
 
+        used_pkgs.append(pkg)
         console.print(f"[dim]Verifying {inst.version}/{inst.arch}...[/dim]")
         dl_mirror = pkg.mirror if mirror == "auto" else mirror
         try:
@@ -1420,7 +1511,12 @@ def verify(ctx, fix, verbose, mirror):
 
     # Non-zero exit so scripts/CI can detect problems; with --fix only a
     # failed fix attempt is an error (the problems themselves were addressed).
-    if (not fix and problem_count > 0) or (fix and fix_failed > 0):
+    # A failed --verify-signatures check is ORed in on top.
+    sig_ok = True
+    if verify_signatures and used_pkgs:
+        sig_ok = _run_signature_checks(used_pkgs, glibc_dir, keyring)
+
+    if (not fix and problem_count > 0) or (fix and fix_failed > 0) or not sig_ok:
         sys.exit(1)
 
 
