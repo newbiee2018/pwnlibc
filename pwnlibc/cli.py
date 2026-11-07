@@ -1377,7 +1377,9 @@ def download_all(ctx, arch, mirror, with_dbg, source, check, verify_signatures, 
     if any_success:
         _chown_after_write(glibc_dir)
 
-    if not sig_ok:
+    # Mirror `download`'s exit contract: zero successes is a failure for
+    # scripts, even though per-item failures were already printed.
+    if not any_success or not sig_ok:
         sys.exit(1)
 
 

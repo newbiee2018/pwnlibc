@@ -1173,3 +1173,44 @@ class TestBuildOfflineLocalSource:
         mock_build.assert_called_once()
         mock_check.assert_not_called()
         assert "Build complete" in result.output
+
+
+class TestDownloadAllExitSemantics:
+    """download-all must exit 1 when nothing succeeded, like download does —
+    provisioning scripts key off the exit code."""
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.cli.download_glibc", side_effect=RuntimeError("net down"))
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_all_downloads_failed_exits_1(self, mock_scrape, mock_dl, mock_chown,
+                                          tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all",
+        ])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        mock_chown.assert_not_called()  # nothing written -> no ownership pass
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_partial_failure_still_exits_0(self, mock_scrape, mock_dl, mock_chown,
+                                           tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_scrape.return_value = [
+            _mk_pkg("2.31-0ubuntu9.16_amd64"),
+            _mk_pkg("2.35-0ubuntu3.1_amd64"),
+        ]
+        mock_dl.side_effect = [None, RuntimeError("net down")]  # 2.31 ok
+
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download-all",
+        ])
+        assert result.exit_code == 0
