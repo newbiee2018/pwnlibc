@@ -405,6 +405,151 @@ class TestBuildGlibcStructure:
         assert result == glibc_dir / "2.31" / "armhf-built"
         assert result.is_dir()
 
+    @patch("pwnlibc.builder._download_file")
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_build_reuses_local_source(self, mock_urlopen, mock_run,
+                                       mock_download, tmp_path):
+        """A saved source tree with configure is used in place — no download."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        local_src = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        local_src.mkdir(parents=True)
+        (local_src / "configure").write_text("#!/bin/sh\nexit 0\n")
+
+        mock_urlopen.return_value = _make_mock_urlopen()
+        configure_cmd = None
+        tar_called = False
+        base_effect = _make_build_run_side_effect("2.31")
+
+        def run_side_effect(cmd, **kwargs):
+            nonlocal configure_cmd, tar_called
+            if cmd[0] == "tar":
+                tar_called = True
+            if "configure" in str(cmd[0]):
+                configure_cmd = cmd
+            return base_effect(cmd, **kwargs)
+
+        mock_run.side_effect = run_side_effect
+
+        progress_calls = []
+
+        def progress_cb(stage, downloaded, total):
+            progress_calls.append(stage)
+
+        result = build_glibc("2.31", "amd64", glibc_dir, progress_cb=progress_cb)
+
+        mock_download.assert_not_called()
+        assert not tar_called  # no extraction either
+        assert result == glibc_dir / "2.31" / "amd64-built"
+        assert result.is_dir()
+        # Source is used in place: configure runs from the local tree.
+        assert configure_cmd is not None
+        assert configure_cmd[0] == str(local_src / "configure")
+        assert "using local source" in progress_calls
+        assert "downloading source" not in progress_calls
+
+    @patch("pwnlibc.builder._download_file")
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_incomplete_local_source_falls_back_to_download(
+            self, mock_urlopen, mock_run, mock_download, tmp_path):
+        """A source dir without configure (incomplete extraction) is not
+        reusable; the build falls back to downloading the tarball."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        partial = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        partial.mkdir(parents=True)
+        (partial / "README").write_text("incomplete extraction")
+
+        mock_urlopen.return_value = _make_mock_urlopen()
+        mock_run.side_effect = _make_build_run_side_effect("2.31")
+
+        result = build_glibc("2.31", "amd64", glibc_dir)
+
+        mock_download.assert_called_once()
+        assert result == glibc_dir / "2.31" / "amd64-built"
+        assert result.is_dir()
+
+    @patch("pwnlibc.builder.subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_make_timeout_passthrough(self, mock_urlopen, mock_run, tmp_path):
+        """timeout applies to the make subprocess only; 0 disables it."""
+        mock_urlopen.return_value = _make_mock_urlopen()
+        mock_run.side_effect = _make_build_run_side_effect("2.31")
+
+        def make_and_configure_kwargs():
+            make_kwargs = None
+            configure_kwargs = []
+            for c in mock_run.call_args_list:
+                cmd = c.args[0]
+                if cmd[0] == "make" and "install" not in cmd:
+                    make_kwargs = c.kwargs
+                elif "configure" in str(cmd[0]):
+                    configure_kwargs.append(c.kwargs)
+            return make_kwargs, configure_kwargs
+
+        glibc_dir = tmp_path / "g1"
+        glibc_dir.mkdir()
+        build_glibc("2.31", "amd64", glibc_dir, timeout=99)
+        make_kwargs, configure_kwargs = make_and_configure_kwargs()
+        assert make_kwargs is not None
+        assert make_kwargs["timeout"] == 99
+        # configure (and install) stay uncapped
+        assert all("timeout" not in kw for kw in configure_kwargs)
+
+        mock_run.reset_mock()
+        glibc_dir = tmp_path / "g2"  # fresh dir: no saved source reuse
+        glibc_dir.mkdir()
+        build_glibc("2.31", "amd64", glibc_dir, timeout=0)
+        make_kwargs, _ = make_and_configure_kwargs()
+        assert make_kwargs is not None
+        assert make_kwargs["timeout"] is None
+
+
+class TestLocalSourceDir:
+    """_local_source_dir picks a reusable extracted source tree."""
+
+    def test_prefers_version_named_dir(self, tmp_path):
+        from pwnlibc.builder import _local_source_dir
+        glibc_dir = tmp_path / "glibc"
+        preferred = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        preferred.mkdir(parents=True)
+        (preferred / "configure").write_text("#!/bin/sh\n")
+        other = glibc_dir / "2.31" / "source" / "aaa"
+        other.mkdir()
+        (other / "configure").write_text("#!/bin/sh\n")
+        assert _local_source_dir(glibc_dir, "2.31") == preferred
+
+    def test_falls_back_to_first_dir_with_configure(self, tmp_path):
+        from pwnlibc.builder import _local_source_dir
+        glibc_dir = tmp_path / "glibc"
+        source = glibc_dir / "2.31" / "source"
+        (source / "aaa").mkdir(parents=True)  # no configure
+        fallback = source / "bbb"
+        fallback.mkdir()
+        (fallback / "configure").write_text("#!/bin/sh\n")
+        assert _local_source_dir(glibc_dir, "2.31") == fallback
+
+    def test_no_configure_means_none(self, tmp_path):
+        from pwnlibc.builder import _local_source_dir
+        glibc_dir = tmp_path / "glibc"
+        partial = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        partial.mkdir(parents=True)
+        assert _local_source_dir(glibc_dir, "2.31") is None
+
+    def test_missing_source_dir_means_none(self, tmp_path):
+        from pwnlibc.builder import _local_source_dir
+        assert _local_source_dir(tmp_path / "glibc", "2.31") is None
+
+    def test_ds1_version_maps_to_gnu_name(self, tmp_path):
+        from pwnlibc.builder import _local_source_dir
+        glibc_dir = tmp_path / "glibc"
+        preferred = glibc_dir / "2.3.6.ds1" / "source" / "glibc-2.3.6"
+        preferred.mkdir(parents=True)
+        (preferred / "configure").write_text("#!/bin/sh\n")
+        assert _local_source_dir(glibc_dir, "2.3.6.ds1") == preferred
+
 
 class TestBuildUsesDownloader:
     """build_glibc delegates downloading to downloader._download_file."""

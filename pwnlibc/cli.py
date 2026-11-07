@@ -1321,8 +1321,10 @@ def download_all(ctx, arch, mirror, with_dbg, check, verify_signatures, keyring)
 @click.argument("versions", nargs=-1, required=True)
 @click.option("--arch", type=click.Choice(ALL_ARCHES), required=True,
               help="Target architecture.")
+@click.option("--timeout", type=int, default=1800, metavar="SECONDS",
+              help="make timeout; 0 disables.")
 @click.pass_context
-def build(ctx, versions, arch):
+def build(ctx, versions, arch, timeout):
     """Build glibc from source with debug symbols (-g3).
 
     Produces a separate 'built' variant alongside deb installs.
@@ -1374,7 +1376,8 @@ def build(ctx, versions, arch):
                 progress.update(tid, description=f"  {stage}")
 
             try:
-                result_dir = build_glibc(version, arch, glibc_dir, progress_cb=cb)
+                result_dir = build_glibc(version, arch, glibc_dir, progress_cb=cb,
+                                         timeout=timeout)
             except Exception as e:
                 build_err = e
 

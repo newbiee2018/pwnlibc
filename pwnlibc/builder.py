@@ -67,20 +67,39 @@ def check_source_available(version: str) -> str | None:
     return None
 
 
+def _local_source_dir(glibc_dir: Path, version: str) -> Path | None:
+    """Find a reusable extracted source tree under <glibc_dir>/<version>/source/.
+
+    Prefers glibc-<gnu_source_version(version)>, else the first directory
+    there (sorted, for determinism) that contains a `configure` file. A dir
+    without `configure` is an incomplete extraction and is NOT reusable —
+    None is returned so the caller falls back to downloading the tarball.
+    """
+    source_root = glibc_dir / version / "source"
+    if not source_root.is_dir():
+        return None
+    preferred = source_root / f"glibc-{gnu_source_version(version)}"
+    if (preferred / "configure").is_file():
+        return preferred
+    for d in sorted(source_root.iterdir()):
+        if d.is_dir() and (d / "configure").is_file():
+            return d
+    return None
+
+
 def build_glibc(
     version: str,
     arch: str,
     glibc_dir: Path,
     progress_cb=None,
+    timeout: int = 1800,
 ) -> Path:
     info = ARCH_INFO[arch]
     triplet = info["cross_triplet"]
     out_prefix = glibc_dir / version / f"{arch}-built"
 
     src_ver = gnu_source_version(version)
-    url = check_source_available(version)
-    if url is None:
-        raise RuntimeError(f"Source not found on ftp.gnu.org for glibc-{src_ver}")
+    local_src = _local_source_dir(glibc_dir, version)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -88,27 +107,41 @@ def build_glibc(
         # after the whole build succeeds, so a failed rebuild never destroys
         # the user's existing (expensive-to-recreate) built variant.
         install_dir = tmp / "install"
-        tarball = tmp / url.rsplit("/", 1)[-1]
 
-        if progress_cb:
-            progress_cb("downloading source", 0, 0)
-            dl_cb = lambda d, t: progress_cb("downloading source", d, t)
+        if local_src is not None:
+            # Reuse the already-extracted source tree in place (saved by
+            # `source download` or a previous build). The build dir below is
+            # a separate temp dir and out-of-tree builds never write into
+            # the source, so no copy is made.
+            src_dir = local_src
+            if progress_cb:
+                progress_cb("using local source", 0, 0)
         else:
-            dl_cb = None
-        _download_file(url, tarball, dl_cb)
+            url = check_source_available(version)
+            if url is None:
+                raise RuntimeError(f"Source not found on ftp.gnu.org for glibc-{src_ver}")
 
-        if progress_cb:
-            progress_cb("extracting source", 0, 0)
-        subprocess.run(["tar", "xf", str(tarball), "-C", str(tmp)],
-                        check=True, capture_output=True)
+            tarball = tmp / url.rsplit("/", 1)[-1]
 
-        src_dir = tmp / f"glibc-{src_ver}"
-        if not src_dir.is_dir():
-            candidates = [d for d in tmp.iterdir() if d.is_dir() and d.name.startswith("glibc")]
-            if candidates:
-                src_dir = candidates[0]
+            if progress_cb:
+                progress_cb("downloading source", 0, 0)
+                dl_cb = lambda d, t: progress_cb("downloading source", d, t)
             else:
-                raise RuntimeError(f"Source directory not found after extracting {tarball}")
+                dl_cb = None
+            _download_file(url, tarball, dl_cb)
+
+            if progress_cb:
+                progress_cb("extracting source", 0, 0)
+            subprocess.run(["tar", "xf", str(tarball), "-C", str(tmp)],
+                            check=True, capture_output=True)
+
+            src_dir = tmp / f"glibc-{src_ver}"
+            if not src_dir.is_dir():
+                candidates = [d for d in tmp.iterdir() if d.is_dir() and d.name.startswith("glibc")]
+                if candidates:
+                    src_dir = candidates[0]
+                else:
+                    raise RuntimeError(f"Source directory not found after extracting {tarball}")
 
         build_dir = tmp / "build"
         build_dir.mkdir()
@@ -161,7 +194,7 @@ def build_glibc(
             env=env,
             capture_output=True,
             text=True,
-            timeout=1800,
+            timeout=(timeout if timeout and timeout > 0 else None),
         )
         if result.returncode != 0:
             raise RuntimeError(f"make failed:\n{result.stderr[-2000:]}")
