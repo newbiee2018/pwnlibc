@@ -263,6 +263,22 @@ def _pick_best(packages: list[DebPackage]) -> dict[tuple[str, str], DebPackage]:
     return best
 
 
+def _resolve_latest(packages: list[DebPackage], arches: list[str]) -> dict[str, str]:
+    """Newest glibc version per arch among `packages` (max by parse_version).
+
+    Callers pass the post-chain-filter set for the run, so each arch's max is
+    within its own mirror chain (or the exact --mirror scrape) — a single
+    distribution family, where version comparison is well-defined. Arches
+    with no packages are omitted from the result.
+    """
+    latest: dict[str, str] = {}
+    for arch in arches:
+        versions = {p.version for p in packages if p.arch == arch}
+        if versions:
+            latest[arch] = max(versions, key=parse_version)
+    return latest
+
+
 def _variant_label(inst) -> str:
     label = inst.variant
     if inst.has_debug:
@@ -1129,11 +1145,18 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
              verify_signatures, keyring):
     """Download one or more glibc versions.
 
+    `latest` resolves, per target arch, to the newest glibc in that arch's
+    own mirror chain (or the exact --mirror catalog).
+
     Examples:
 
       pwnlibc download 2.31
 
       pwnlibc download 2.27 2.31 2.35
+
+      pwnlibc download latest
+
+      pwnlibc download 2.31 latest
 
       pwnlibc download 2.31 --arch arm64
     """
@@ -1152,6 +1175,31 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
     console.print(f"[bold]Fetching package lists...[/bold] [dim]({', '.join(sorted(mirrors_to_try))})[/dim]")
     all_packages = _scrape_mirrors(mirrors_to_try)
     chain_packages = _auto_chain_only(all_packages) if mirror == "auto" else all_packages
+
+    # `latest` is a token, not a version: expand the argument list once,
+    # after chain filtering, into per-arch resolved versions. Resolved
+    # versions then flow through the download loop exactly like explicit
+    # ones (best-pick, source download, signature checks, ownership repair).
+    if "latest" in versions:
+        expanded: list[str] = []
+        for arg in versions:
+            if arg != "latest":
+                if arg not in expanded:
+                    expanded.append(arg)
+                continue
+            resolved = _resolve_latest(chain_packages, archs_to_download)
+            for arch in archs_to_download:
+                version = resolved.get(arch)
+                if version is None:
+                    tried = ", ".join(sorted(mirrors_to_try))
+                    console.print(
+                        f"[red]latest ({arch}): no packages found on mirrors ({tried})[/red]"
+                    )
+                    continue
+                console.print(f"[cyan]latest[/cyan] ({arch}) → [bold]{version}[/bold]")
+                if version not in expanded:
+                    expanded.append(version)
+        versions = expanded
 
     any_success = False
     used_pkgs: list[DebPackage] = []

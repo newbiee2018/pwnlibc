@@ -76,6 +76,9 @@ pwnlibc available --arch amd64
 # Download glibc 2.31 (amd64 + i686, with debug symbols)
 sudo pwnlibc download 2.31
 
+# Or grab the newest glibc per arch
+sudo pwnlibc download latest
+
 # Download multiple versions at once
 sudo pwnlibc download 2.27 2.31 2.35
 
@@ -132,6 +135,8 @@ Download one or more glibc versions from Ubuntu mirrors.
 ```bash
 pwnlibc download 2.31                          # amd64+i686, with debug
 pwnlibc download 2.27 2.31 2.35                # multiple versions at once
+pwnlibc download latest                        # newest glibc per arch
+pwnlibc download 2.31 latest                   # mixes with explicit versions
 pwnlibc download 2.39 --arch arm64             # arm64 only
 pwnlibc download 2.39 --no-dbg                 # skip debug symbols
 pwnlibc download 2.39 --source                 # also grab GNU source
@@ -140,6 +145,8 @@ pwnlibc download 2.19 --arch powerpc --mirror old-ubuntu  # old powerpc
 ```
 
 Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs to `<glibc-dir>/<version>/<arch>/lib/`.
+
+`latest` is a token, not a version: it resolves per target arch to the newest glibc in that arch's own mirror chain, announcing each resolution (`latest (amd64) → 2.39`) before downloading. It respects `--arch` and `--mirror` (with an explicit mirror, `latest` is the newest version in that mirror's catalog) and dedupes against explicit versions, so `download 2.39 latest` installs 2.39 once. An arch whose package list came back empty reports `latest (arch): no packages found on mirrors (...)` and counts as a failure.
 
 Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`. Each installed line reports the mirror it came from, and Ubuntu/Debian package revisions are never compared across distributions — the origin shown by `available` is the origin `download` uses and `verify` checks against.
 

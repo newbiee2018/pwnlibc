@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from pwnlibc.cli import _pick_best, cli
+from pwnlibc.cli import _pick_best, _resolve_latest, cli
 from pwnlibc.downloader import DebPackage
 from tests.conftest import (
     SAMPLE_MIRROR_HTML,
@@ -756,6 +756,150 @@ class TestDownloadVerifySignatures:
         ])
         assert result.exit_code == 0
         assert calls == ["sig", "chown"]
+
+
+# ---------------------------------------------------------------------------
+# download latest — newest glibc per arch from the mirror chain
+# ---------------------------------------------------------------------------
+
+def _latest_chain_pkgs():
+    """Post-chain-filter fixture: newest glibc is 2.39 on both x86 arches."""
+    return [
+        _mk_pkg("2.27-3ubuntu1.4_amd64"),
+        _mk_pkg("2.31-0ubuntu9.16_amd64"),
+        _mk_pkg("2.39-0ubuntu8.3_amd64"),
+        _mk_pkg("2.27-3ubuntu1.4_i686", arch="i686"),
+        _mk_pkg("2.39-0ubuntu8.3_i686", arch="i686"),
+    ]
+
+
+class TestResolveLatest:
+    def test_resolve_latest_picks_max_per_arch(self):
+        pkgs = _latest_chain_pkgs()
+        assert _resolve_latest(pkgs, ["amd64", "i686"]) == {
+            "amd64": "2.39",
+            "i686": "2.39",
+        }
+
+    def test_resolve_latest_omits_empty_arch(self):
+        pkgs = [_mk_pkg("2.31-0ubuntu9.16_amd64")]
+        assert _resolve_latest(pkgs, ["amd64", "arm64"]) == {"amd64": "2.31"}
+
+    def test_resolve_latest_orders_numerically(self):
+        """2.10 > 2.9 — not lexicographic."""
+        pkgs = [_mk_pkg("2.9-1ubuntu10_amd64"), _mk_pkg("2.10-1ubuntu1_amd64")]
+        assert _resolve_latest(pkgs, ["amd64"]) == {"amd64": "2.10"}
+
+
+class TestDownloadLatest:
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_resolves_newest(self, mock_scrape, mock_dl, tmp_path):
+        mock_scrape.return_value = _latest_chain_pkgs()
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--arch", "amd64", "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert "latest (amd64)" in result.output and "2.39" in result.output
+        assert mock_dl.call_args[0][0].version == "2.39"
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_mixed_with_explicit(self, mock_scrape, mock_dl, tmp_path):
+        mock_scrape.return_value = _latest_chain_pkgs()
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.31", "latest", "--arch", "amd64", "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert mock_dl.call_count == 2
+        downloaded = {call.args[0].version for call in mock_dl.call_args_list}
+        assert downloaded == {"2.31", "2.39"}
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_dedupes_explicit(self, mock_scrape, mock_dl, tmp_path):
+        """latest resolving to an explicitly given version downloads it once."""
+        mock_scrape.return_value = _latest_chain_pkgs()
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.39", "latest", "--arch", "amd64", "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert "latest (amd64)" in result.output
+        assert mock_dl.call_count == 1
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_unresolvable_arch(self, mock_scrape, mock_dl, tmp_path):
+        """Chain has no packages for the arch: red per-arch error, exit 1,
+        no traceback, and no literal-version 'not found' message for the token."""
+        mock_scrape.return_value = []
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--arch", "amd64", "--no-source",
+        ])
+        assert result.exit_code == 1
+        assert "latest (amd64): no packages found on mirrors" in result.output
+        assert "ubuntu" in result.output  # the tried mirror list is named
+        assert ": not found on mirrors" not in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        mock_dl.assert_not_called()
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_partial_arch(self, mock_scrape, mock_dl, tmp_path):
+        """--arch all with i686 missing: amd64 still resolves and downloads,
+        i686 gets the red per-arch error."""
+        mock_scrape.return_value = [_mk_pkg("2.39-0ubuntu8.3_amd64")]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert "latest (amd64)" in result.output
+        assert "latest (i686): no packages found on mirrors" in result.output
+        mock_dl.assert_called_once()
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_legacy_chain(self, mock_scrape, mock_dl, tmp_path):
+        """powerpc's chain is old-releases only; latest resolves the old
+        newest just the same."""
+        mock_scrape.return_value = [
+            _mk_pkg("2.19-0ubuntu9_powerpc", mirror="old-ubuntu", arch="powerpc"),
+            _mk_pkg("2.23-0ubuntu11_powerpc", mirror="old-ubuntu", arch="powerpc"),
+        ]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--arch", "powerpc", "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert "latest (powerpc)" in result.output
+        assert "2.23" in result.output
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args[0][0].version == "2.23"
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_explicit_mirror(self, mock_scrape, mock_dl, tmp_path):
+        """Exact-mirror mode: latest resolves within the raw scrape of
+        --mirror (no auto chain filtering)."""
+        mock_scrape.return_value = [
+            _mk_pkg("2.28-10_amd64", mirror="debian"),
+            _mk_pkg("2.36-9+deb12u3_amd64", mirror="debian"),
+        ]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--arch", "amd64", "--mirror", "debian",
+            "--no-source",
+        ])
+        assert result.exit_code == 0
+        assert "latest (amd64)" in result.output and "2.36" in result.output
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args[0][0].version == "2.36"
+        assert mock_dl.call_args.kwargs["mirror"] == "debian"
 
 
 class TestDownloadAllVerifySignatures:
