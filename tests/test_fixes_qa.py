@@ -1466,20 +1466,41 @@ class TestRestoreManifest:
 
     def test_manifest_cannot_delete_non_lib_files(self, runner, tmp_path):
         """A tampered manifest must not name arbitrary files (flag.txt,
-        Makefile, ...) in the binary's directory for deletion: only names a
+        Makefile, ...) in the binary's directory for deletion — directly or
+        via lib/../ or .debug/../ traversal that lands on them: only names a
         copy-mode patch can create (lib*, ld-*, .debug/*) are honored."""
         binary = self._make_binary(tmp_path)
         (binary.parent / "libc-2.31.so").write_bytes(b"lib")
         (binary.parent / "flag.txt").write_text("CTF flag — must survive")
         (binary.parent / "notes.md").write_text("user notes — must survive")
+        (binary.parent / "notes.txt").write_text("more notes — must survive")
         manifest = self._make_manifest(
-            binary, ["flag.txt", "notes.md", "libc-2.31.so"])
+            binary,
+            ["flag.txt", "notes.md",
+             "lib/../notes.txt",     # traversal wearing a lib* prefix
+             ".debug/../flag.txt",   # traversal wearing a .debug/ prefix
+             "libc-2.31.so"])
 
         result = runner.invoke(cli, ["restore", str(binary)])
         assert result.exit_code == 0
         assert (binary.parent / "flag.txt").exists()
         assert (binary.parent / "notes.md").exists()
+        assert (binary.parent / "notes.txt").exists()
         assert not (binary.parent / "libc-2.31.so").exists()  # sane entry honored
+        assert not manifest.exists()
+
+    def test_manifest_symlink_escape_refused(self, runner, tmp_path):
+        """A lib*-named symlink must not act as a deletion handle for the
+        file it points at (resolution must stay a lib*/ld-* basename or a
+        .debug/ child of the binary's directory)."""
+        binary = self._make_binary(tmp_path)
+        (binary.parent / "precious.txt").write_text("must survive")
+        (binary.parent / "libx.so").symlink_to("precious.txt")
+        manifest = self._make_manifest(binary, ["libx.so"])
+
+        result = runner.invoke(cli, ["restore", str(binary)])
+        assert result.exit_code == 0
+        assert (binary.parent / "precious.txt").exists()
         assert not manifest.exists()
 
 

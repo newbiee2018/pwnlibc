@@ -715,23 +715,37 @@ def _consume_patch_manifest(binary: Path) -> bool:
     except (OSError, ValueError):
         pass  # unreadable/corrupt manifest: nothing we can safely delete
 
-    def _patch_artifact(rel: str) -> bool:
-        # Only names a copy-mode patch can create (glibc libs land as lib*/
-        # or ld-*; debug files under .debug/). A tampered manifest naming
-        # arbitrary files (flag.txt, notes.md) in the binary's directory
-        # must not get them deleted.
-        return rel.startswith((".debug/", "lib", "ld-"))
+    def _patch_artifact(raw: str, resolved: Path) -> bool:
+        """Only names a copy-mode patch can create: a lib*/ld-* basename in
+        the binary's directory, or a file under .debug/. Checked on the RAW
+        string (no separators or dot-segments) AND post-resolution (must
+        resolve to that same shape inside parent), so lib/../flag.txt or a
+        lib*-named symlink cannot wear the prefix as a deletion handle."""
+        if raw.startswith(".debug/"):
+            name = raw[len(".debug/"):]
+            raw_ok = bool(name) and "/" not in name and name not in (".", "..")
+        else:
+            raw_ok = ("/" not in raw and "\\" not in raw
+                      and raw not in (".", "..")
+                      and raw.startswith(("lib", "ld-")))
+        if not raw_ok:
+            return False
+        try:
+            parts = resolved.relative_to(parent).parts
+        except ValueError:
+            return False  # resolution escaped the parent (symlink) — refuse
+        if len(parts) == 1:
+            return parts[0].startswith(("lib", "ld-")) and parts[0] not in (".", "..")
+        return parts[0] == ".debug" and len(parts) >= 2
 
     debug_dir = parent / ".debug"
     removed: list[str] = []
-    for rel in entries:
-        if not _patch_artifact(rel):
-            continue
-        resolved = (parent / rel).resolve()
+    for raw in entries:
+        resolved = (parent / raw).resolve()
         if resolved in (binary, manifest):
             continue
-        if resolved.parent not in (parent, debug_dir):
-            continue  # refuses traversal / tampered entries
+        if not _patch_artifact(raw, resolved):
+            continue  # refuses arbitrary/traversing/tampered entries
         if resolved.is_file() or resolved.is_symlink():
             resolved.unlink()
             removed.append(resolved.name)
