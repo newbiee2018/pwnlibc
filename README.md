@@ -12,21 +12,13 @@ CTF glibc manager and ELF patcher. Downloads prebuilt glibc from Ubuntu mirrors,
 
 ## Clone
 
-This repo uses the `debug_glibc` submodule. Clone recursively:
-
 ```bash
-git clone --recursive https://github.com/newbiee2018/pwnlibc.git
-```
-
-If you already cloned without submodules:
-
-```bash
-git submodule update --init --recursive
+git clone https://github.com/newbiee2018/pwnlibc.git
 ```
 
 ## Install
 
-Recommended — [pipx](https://pipx.pypa.io) (isolated venv, no dependency pollution, easy upgrades):
+[pipx](https://pipx.pypa.io) (isolated venv, no dependency pollution, easy upgrades):
 
 ```bash
 sudo apt install pipx                     # if not already installed
@@ -43,29 +35,16 @@ pipx upgrade pwnlibc      # snapshot installs only; editable installs update aut
 pipx uninstall pwnlibc
 ```
 
-No pipx (e.g. stock Python 3.8+ systems)? Plain pip works too:
-
-```bash
-python3 -m pip install --user --editable /path/to/pwnlibc
-# newer Debian/Ubuntu (PEP 668) needs the bypass flag BEFORE the path:
-python3 -m pip install --user --break-system-packages --editable /path/to/pwnlibc
-```
-
-The `pwnlibc` command lands in `~/.local/bin` (add it to PATH if needed). Uninstall with `python3 -m pip uninstall pwnlibc`. `bash install.sh` picks the best method automatically: pipx when present, then pip `--user` (editable), then a legacy `.pth` path-hook fallback that needs no pip at all — and it cleans up artifacts older versions of the script left behind.
-
-Or run the repo installer, which prompts for the glibc data directory once (Enter accepts `~/pwnlibc`, or an existing `/glibc`), persists your choice, and then installs the command the same way as above: pipx when available, then pip `--user` (editable), then the legacy `.pth` method — cleaning up the wrapper and path hook older versions of the script left behind:
+Alternatively, the repo installer prompts for the glibc data directory once (Enter accepts `~/pwnlibc`), persists your choice, and installs via pipx exactly as above:
 
 ```bash
 cd pwnlibc/
 bash install.sh
 ```
 
-Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `mkdir -p ~/pwnlibc`) sets that up. Alternatively, run directly without installing:
+Note: pipx installs the CLI, not the glibc data directory — `bash install.sh` (or `mkdir -p ~/pwnlibc`) sets that up.
 
-```bash
-pip3 install click rich
-python3 -m pwnlibc --help
-```
+Prebuilt debug glibc archives live in the separate [debug_glibc](https://github.com/newbiee2018/debug_glibc) repository. You never need to clone it — `pwnlibc setup --download VERSION` fetches (and sha256-verifies) exactly the tarballs you ask for; see `pwnlibc setup`.
 
 ## Quick start
 
@@ -314,15 +293,19 @@ pwnlibc source remove 2.31            # remove source
 
 Source is shared across architectures at `<glibc-dir>/<version>/source/`. Auto-downloaded by `download` and `build` commands. Auto-removed by `remove` when no deb/built variant remains. Tries `.tar.xz`, `.tar.gz`, `.tar.bz2` formats from `https://ftp.gnu.org/gnu/glibc/`. Debian `.ds1` versions (e.g. `2.3.2.ds1`) map to the base GNU source (e.g. `glibc-2.3.2`).
 
-### `pwnlibc setup ARCHIVE_DIR`
+### `pwnlibc setup`
 
-Extract existing `.tar.gz` archives to the glibc directory. Automatically detects whether archives contain source-built glibc (`.a` static libraries, `libexec/` directories) and places them in the correct variant directory (`<arch>-built/` for source-built, `<arch>/` for deb-style).
+Install prebuilt debug-glibc archives. Automatically detects whether archives contain source-built glibc (`.a` static libraries, `libexec/` directories) and places them in the correct variant directory (`<arch>-built/` for source-built, `<arch>/` for deb-style).
+
+With `--download`, fetch the archives straight from the [debug_glibc](https://github.com/newbiee2018/debug_glibc) repository — each tarball is verified against its Git-LFS pointer's sha256, and only the versions you name are fetched (that repo is far too large to clone wholesale). Without it, `setup` reads `.tar.gz` files from a local directory you pass as `ARCHIVE_DIR`.
 
 ```bash
-pwnlibc setup ./debug_glibc                           # auto-detect variant
-pwnlibc setup ./debug_glibc --variant built            # force built variant
-pwnlibc setup /path/to/archives --target-dir /opt/glibc   # any writable dir
+pwnlibc setup --download 2.23 2.27        # fetch prebuilt archives, no clone
+pwnlibc setup --download 2.23 --variant built
+pwnlibc setup /path/to/archives --target-dir /opt/glibc   # local .tar.gz dir
 ```
+
+`setup` exits with status 1 when nothing was installed (every fetch failed or unusable); versions that already exist are skipped, and a run of only already-present versions still exits 0.
 
 ### `pwnlibc info BINARY`
 
