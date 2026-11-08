@@ -94,3 +94,34 @@ class TestFindLibrary:
         inst = resolve_lib_paths("2.31", "amd64", populated_glibc_dir)
         result = find_library(inst, "libc.so.6")
         assert result is not None
+
+
+class TestSourcePresent:
+    """source_present: only a real extracted tree (a subdir with configure)
+    counts — a partial/interrupted extraction must not."""
+
+    def test_real_tree_present(self, tmp_path):
+        from pwnlibc.glibc import source_present
+        src = tmp_path / "2.31" / "source"
+        sub = src / "glibc-2.31"
+        sub.mkdir(parents=True)
+        (sub / "configure").write_text("#!/bin/sh\n")
+        assert source_present(src) is True
+
+    def test_partial_tree_not_present(self, tmp_path):
+        from pwnlibc.glibc import source_present
+        src = tmp_path / "2.31" / "source"
+        sub = src / "glibc-2.31"
+        sub.mkdir(parents=True)
+        (sub / "malloc.c").write_text("// truncated extraction\n")
+        assert source_present(src) is False
+
+    def test_empty_dir_not_present(self, tmp_path):
+        from pwnlibc.glibc import source_present
+        src = tmp_path / "2.31" / "source"
+        src.mkdir(parents=True)
+        assert source_present(src) is False
+
+    def test_missing_dir_not_present(self, tmp_path):
+        from pwnlibc.glibc import source_present
+        assert source_present(tmp_path / "nope") is False

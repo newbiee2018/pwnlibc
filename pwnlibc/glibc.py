@@ -92,6 +92,22 @@ def resolve_lib_paths(version: str, arch: str, glibc_dir: Path,
     )
 
 
+def source_present(source_dir: Path) -> bool:
+    """Whether source_dir holds a real extracted glibc source tree: at least
+    one subdirectory containing a `configure` script.
+
+    A partial (interrupted/truncated) extraction has content but no
+    configure anywhere and must NOT count as present — every presence gate
+    (source download/check/available, download's source step) uses this so a
+    broken tree gets re-downloaded instead of being skipped forever."""
+    if not source_dir.is_dir():
+        return False
+    return any(
+        (d / "configure").is_file()
+        for d in source_dir.iterdir() if d.is_dir()
+    )
+
+
 def discover_installed(glibc_dir: Path) -> list[GlibcInstall]:
     if not glibc_dir.is_dir():
         return []

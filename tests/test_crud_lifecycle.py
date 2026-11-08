@@ -73,6 +73,7 @@ def _create_deb_install(glibc_dir, version, arch, with_debug=False, with_source=
         source_dir.mkdir(parents=True, exist_ok=True)
         src_subdir = source_dir / f"glibc-{version}"
         src_subdir.mkdir(exist_ok=True)
+        (src_subdir / "configure").write_text("#!/bin/sh\n")
         (src_subdir / "malloc.c").write_text("// glibc source\n")
 
     return lib_dir.parent
@@ -107,6 +108,7 @@ def _create_built_install(glibc_dir, version, arch, with_debug=True, with_source
         source_dir.mkdir(parents=True, exist_ok=True)
         src_subdir = source_dir / f"glibc-{version}"
         src_subdir.mkdir(exist_ok=True)
+        (src_subdir / "configure").write_text("#!/bin/sh\n")
         (src_subdir / "malloc.c").write_text("// glibc source\n")
 
     return lib_dir.parent
@@ -1352,3 +1354,38 @@ class TestSourceRemoveFailures:
         assert result.exception is None or isinstance(result.exception, SystemExit)
         assert "Permission denied" in result.output
         assert "chown" in result.output  # actionable hint, like `remove`
+
+
+class TestPartialSourceTreeGates:
+    """A configure-less (interrupted-extraction) source tree must not count
+    as installed at any presence gate."""
+
+    def test_source_check_reports_missing_for_partial_tree(self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        _create_deb_install(glibc_dir, "2.31", "amd64")
+        partial = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        partial.mkdir(parents=True)
+        (partial / "malloc.c").write_text("// truncated extraction\n")
+
+        result = runner.invoke(cli, ["--glibc-dir", str(glibc_dir), "source", "check"])
+        assert result.exit_code == 0
+        assert "2.31: missing" in result.output
+        assert "2.31: OK" not in result.output
+        assert "0 OK, 1 missing" in result.output
+
+    @patch("pwnlibc.builder.check_source_available", return_value=None)
+    def test_source_download_retries_partial_tree(self, mock_check, runner, tmp_path):
+        """A partial tree is not 'already exists': the download is retried
+        (here it finds nothing on the mirror, but it must not skip)."""
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        partial = glibc_dir / "2.31" / "source" / "glibc-2.31"
+        partial.mkdir(parents=True)
+        (partial / "malloc.c").write_text("// truncated extraction\n")
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "source", "download", "2.31",
+        ])
+        mock_check.assert_called_once_with("2.31")  # did not skip
+        assert "not available" in result.output

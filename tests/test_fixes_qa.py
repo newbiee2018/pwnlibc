@@ -1524,3 +1524,51 @@ def test_offline_default_blocks_real_sockets():
     finally:
         client.close()
         srv.close()
+
+
+class TestDownloadSourceAtomicSwap:
+    """download_source extracts to a temp dir and swaps into place: a
+    truncated tarball must never leave a sticky partial tree."""
+
+    URL = "https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz"
+
+    @staticmethod
+    def _fake_tar(extract_into):
+        def run(cmd, **kwargs):
+            assert cmd[:2] == ["tar", "xf"]
+            target = Path(cmd[4])
+            sub = extract_into(target) / "glibc-2.31"
+            sub.mkdir(parents=True, exist_ok=True)
+            (sub / "configure").write_text("#!/bin/sh\n")
+        return run
+
+    @patch("pwnlibc.downloader.subprocess.run")
+    @patch("pwnlibc.downloader._download_file")
+    def test_partial_tree_replaced_on_redownload(self, mock_dl, mock_run, tmp_path):
+        partial = tmp_path / "2.31" / "source" / "glibc-2.31"
+        partial.mkdir(parents=True)
+        (partial / "malloc.c").write_text("// truncated extraction\n")
+
+        mock_run.side_effect = self._fake_tar(lambda t: t)
+        download_source("2.31", tmp_path, url=self.URL)
+
+        tree = tmp_path / "2.31" / "source" / "glibc-2.31"
+        assert (tree / "configure").is_file()   # real tree swapped in
+        assert not (tree / "malloc.c").exists()  # partial content gone
+
+    @patch("pwnlibc.downloader.subprocess.run")
+    @patch("pwnlibc.downloader._download_file")
+    def test_failed_extraction_leaves_old_state_untouched(self, mock_dl, mock_run, tmp_path):
+        import subprocess as sp
+        partial = tmp_path / "2.31" / "source" / "glibc-2.31"
+        partial.mkdir(parents=True)
+        (partial / "malloc.c").write_text("// old partial\n")
+        mock_run.side_effect = sp.CalledProcessError(2, "tar")
+
+        with pytest.raises(sp.CalledProcessError):
+            download_source("2.31", tmp_path, url=self.URL)
+
+        # The old (partial) tree is still exactly what it was — no
+        # half-extracted content mixed in.
+        assert (partial / "malloc.c").read_text() == "// old partial\n"
+        assert list(partial.iterdir()) == [partial / "malloc.c"]

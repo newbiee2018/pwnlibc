@@ -308,15 +308,27 @@ def download_source(version: str, glibc_dir: Path, progress_cb=None,
         raise RuntimeError(f"Source not available on ftp.gnu.org for glibc-{src_ver}")
 
     source_dir = glibc_dir / version / "source"
-    source_dir.mkdir(parents=True, exist_ok=True)
 
+    # Extract into a temp dir and swap into place only on success: a
+    # truncated tarball or Ctrl-C mid-extraction must not leave a partial
+    # tree that every presence gate would then treat as installed. The
+    # rmtree just before the swap only ever removes pwnlibc-managed state
+    # (<version>/source is written exclusively by this tool and by
+    # builder.build_glibc's save step).
     with tempfile.TemporaryDirectory() as tmpdir:
-        tarball = Path(tmpdir) / url.rsplit("/", 1)[-1]
+        tmp = Path(tmpdir)
+        tarball = tmp / url.rsplit("/", 1)[-1]
         _download_file(url, tarball, progress_cb)
+        extract_dir = tmp / "extract"
+        extract_dir.mkdir()
         subprocess.run(
-            ["tar", "xf", str(tarball), "-C", str(source_dir)],
+            ["tar", "xf", str(tarball), "-C", str(extract_dir)],
             check=True, capture_output=True,
         )
+        if source_dir.exists():
+            shutil.rmtree(source_dir)
+        source_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(extract_dir), str(source_dir))
 
     return source_dir
 

@@ -33,7 +33,12 @@ from .downloader import (
     verify_against_deb,
 )
 from .elfutil import detect_arch
-from .glibc import discover_installed, get_debug_build_path, resolve_lib_paths
+from .glibc import (
+    discover_installed,
+    get_debug_build_path,
+    resolve_lib_paths,
+    source_present,
+)
 from .ownership import chown_tree
 from .patcher import patch_copy, patch_inplace
 from .signatures import verify_index_signature
@@ -985,7 +990,7 @@ def source_download(ctx, versions):
     already_present = False
     for version in versions:
         source_dir = glibc_dir / version / "source"
-        if source_dir.is_dir() and any(source_dir.iterdir()):
+        if source_present(source_dir):
             console.print(f"[dim]{version}: source already exists[/dim]")
             already_present = True
             continue
@@ -1063,7 +1068,7 @@ def source_check(ctx):
     missing = 0
     for ver in versions:
         source_dir = glibc_dir / ver / "source"
-        if source_dir.is_dir() and any(source_dir.iterdir()):
+        if source_present(source_dir):
             ok += 1
             console.print(f"  {ver}: [green]OK[/green] [dim]({source_dir})[/dim]")
         else:
@@ -1119,7 +1124,7 @@ def source_available(ctx, versions):
     local_map: dict[str, Path] = {}
     for ver in versions:
         source_dir = glibc_dir / ver / "source"
-        if source_dir.is_dir() and any(source_dir.iterdir()):
+        if source_present(source_dir):
             local_map[ver] = source_dir
         else:
             to_check.append(ver)
@@ -1163,7 +1168,7 @@ def _maybe_download_source(glibc_dir: Path, version: str) -> None:
     from .builder import check_source_available
 
     src_dir = glibc_dir / version / "source"
-    if src_dir.is_dir() and any(src_dir.iterdir()):
+    if source_present(src_dir):
         return
     console.print(f"[dim]Downloading source for {version}...[/dim]")
     try:
