@@ -27,6 +27,7 @@ from .config import ALL_ARCHES, ARCH_INFO, DEFAULT_GLIBC_DIR, MIRRORS, MIRROR_FA
 from .downloader import (
     DebPackage,
     _candidate_suites,
+    debug_glibc_fetch,
     download_glibc,
     download_source,
     scrape_available,
@@ -1718,8 +1719,88 @@ def _is_source_built(path: Path) -> bool:
     return False
 
 
+def _process_setup_archive(arc: Path, target_dir: Path, variant: str) -> str:
+    """Extract one .tar.gz glibc archive into target_dir.
+
+    Returns "installed" when anything was copied, "present" when everything
+    already existed (idempotent re-run), "error" for an unusable archive.
+    """
+    import tempfile
+
+    version = arc.stem.replace(".tar", "")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        with tarfile.open(arc, "r:gz") as tf:
+            try:
+                tf.extractall(path=tmp_path, filter="data")
+            except TypeError:
+                # Python without the (backported) filter= parameter
+                tf.extractall(path=tmp_path)
+
+        extracted = tmp_path / version
+        if not extracted.is_dir():
+            candidates = [d for d in tmp_path.iterdir() if d.is_dir()]
+            if len(candidates) == 1:
+                extracted = candidates[0]
+            else:
+                console.print(f"  [red]{arc.name}: unexpected archive layout[/red]")
+                return "error"
+
+        detected_variant = variant
+        if variant == "auto":
+            detected_variant = "built" if _is_source_built(extracted) else "deb"
+
+        dest = target_dir / version
+        dest.mkdir(parents=True, exist_ok=True)
+
+        copied = False
+        for sub in sorted(extracted.iterdir()):
+            if not sub.is_dir():
+                continue
+
+            if sub.name == "source":
+                final = dest / "source"
+                if final.is_dir():
+                    console.print(f"  [dim]{version}/source already exists, skipping[/dim]")
+                    continue
+                shutil.copytree(sub, final)
+                copied = True
+                continue
+
+            arch_name = sub.name
+            if detected_variant == "built":
+                final_name = f"{arch_name}-built"
+            else:
+                final_name = arch_name
+
+            final = dest / final_name
+            if final.is_dir():
+                console.print(f"  [dim]{version}/{final_name} already exists, skipping[/dim]")
+                continue
+
+            shutil.copytree(sub, final)
+            copied = True
+
+        console.print(
+            f"  [green]{version} done[/green] "
+            f"[dim]({detected_variant} variant)[/dim]"
+        )
+        return "installed" if copied else "present"
+
+
+def _conclude_setup(any_installed: bool, any_present: bool,
+                    target_dir: Path) -> None:
+    if any_installed or any_present:
+        _chown_after_write(target_dir)
+    if not any_installed and not any_present:
+        console.print("[red]No versions installed.[/red]")
+        sys.exit(1)
+    console.print("[green]Setup complete.[/green]")
+
+
 @cli.command()
-@click.argument("archive_dir", type=click.Path(exists=True, path_type=Path))
+@click.argument("args", nargs=-1)
 @click.option(
     "--target-dir",
     type=click.Path(path_type=Path),
@@ -1728,19 +1809,25 @@ def _is_source_built(path: Path) -> bool:
 )
 @click.option("--variant", type=click.Choice(["auto", "deb", "built"]), default="auto",
               help="auto: detect from archive contents. Source-built archives (.a files, libexec/) → built variant.")
+@click.option("--download", is_flag=True,
+              help="Treat ARGS as glibc versions and fetch each prebuilt debug "
+                   "tarball directly from the debug_glibc repository (Git-LFS, "
+                   "sha256-verified) — no clone of that (large) repo needed.")
 @click.pass_context
-def setup(ctx, archive_dir, target_dir, variant):
-    """Extract .tar.gz archives to glibc dir.
+def setup(ctx, args, target_dir, variant, download):
+    """Extract .tar.gz glibc archives to glibc dir.
 
     Archives containing .a static libraries or libexec/ directories are
     detected as source-built and placed under <arch>-built/ (not <arch>/).
     Override with --variant deb or --variant built.
 
-    ARCHIVE_DIR is the directory containing .tar.gz glibc archives.
+    With --download, ARGS are glibc versions: each prebuilt archive is
+    fetched straight from the debug_glibc repo (verified against its
+    Git-LFS pointer's sha256) instead of reading a local directory.
 
     Examples:
 
-      pwnlibc setup ./debug_glibc
+      pwnlibc setup --download 2.23 2.27
 
       pwnlibc setup /path/to/archives --target-dir /opt/glibc
     """
@@ -1750,6 +1837,44 @@ def setup(ctx, archive_dir, target_dir, variant):
     target_dir.mkdir(parents=True, exist_ok=True)
     _ensure_writable(target_dir)
 
+    import tempfile
+
+    if download:
+        versions = list(args)
+        if not versions:
+            raise click.UsageError(
+                "--download needs at least one glibc version, "
+                "e.g. pwnlibc setup --download 2.23"
+            )
+        any_installed = False
+        any_present = False
+        for version in versions:
+            with tempfile.TemporaryDirectory() as tmp:
+                arc = Path(tmp) / f"{version}.tar.gz"
+                try:
+                    console.print(
+                        f"Fetching {version} from debug_glibc "
+                        f"[dim](prebuilt, sha256-verified)[/dim]..."
+                    )
+                    debug_glibc_fetch(version, arc)
+                except Exception as e:
+                    console.print(f"  [red]{version} failed: {e}[/red]")
+                    continue
+                outcome = _process_setup_archive(arc, target_dir, variant)
+                any_installed |= outcome == "installed"
+                any_present |= outcome == "present"
+        _conclude_setup(any_installed, any_present, target_dir)
+        return
+
+    if len(args) != 1:
+        raise click.UsageError(
+            "setup takes one ARCHIVE_DIR, or versions with --download "
+            "(see pwnlibc setup --help)"
+        )
+    archive_dir = Path(args[0])
+    if not archive_dir.is_dir():
+        raise click.UsageError(f"{archive_dir} is not a directory")
+
     archives = sorted(archive_dir.glob("*.tar.gz"))
     if not archives:
         console.print(f"[red]No .tar.gz files found in {archive_dir}[/red]")
@@ -1757,72 +1882,13 @@ def setup(ctx, archive_dir, target_dir, variant):
 
     console.print(f"Extracting {len(archives)} archives to {target_dir}")
 
-    import tempfile
-
-    any_success = False
+    any_installed = False
+    any_present = False
     for arc in archives:
-        version = arc.stem.replace(".tar", "")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with tarfile.open(arc, "r:gz") as tf:
-                try:
-                    tf.extractall(path=tmp_path, filter="data")
-                except TypeError:
-                    # Python without the (backported) filter= parameter
-                    tf.extractall(path=tmp_path)
-
-            extracted = tmp_path / version
-            if not extracted.is_dir():
-                candidates = [d for d in tmp_path.iterdir() if d.is_dir()]
-                if len(candidates) == 1:
-                    extracted = candidates[0]
-                else:
-                    console.print(f"  [red]{arc.name}: unexpected archive layout[/red]")
-                    continue
-
-            detected_variant = variant
-            if variant == "auto":
-                detected_variant = "built" if _is_source_built(extracted) else "deb"
-
-            dest = target_dir / version
-            dest.mkdir(parents=True, exist_ok=True)
-
-            for sub in sorted(extracted.iterdir()):
-                if not sub.is_dir():
-                    continue
-
-                if sub.name == "source":
-                    final = dest / "source"
-                    if final.is_dir():
-                        console.print(f"  [dim]{version}/source already exists, skipping[/dim]")
-                        continue
-                    shutil.copytree(sub, final)
-                    continue
-
-                arch_name = sub.name
-                if detected_variant == "built":
-                    final_name = f"{arch_name}-built"
-                else:
-                    final_name = arch_name
-
-                final = dest / final_name
-                if final.is_dir():
-                    console.print(f"  [dim]{version}/{final_name} already exists, skipping[/dim]")
-                    continue
-
-                shutil.copytree(sub, final)
-
-            console.print(
-                f"  [green]{version} done[/green] "
-                f"[dim]({detected_variant} variant)[/dim]"
-            )
-            any_success = True
-
-    if any_success:
-        _chown_after_write(target_dir)
-
-    console.print("[green]Setup complete.[/green]")
+        outcome = _process_setup_archive(arc, target_dir, variant)
+        any_installed |= outcome == "installed"
+        any_present |= outcome == "present"
+    _conclude_setup(any_installed, any_present, target_dir)
 
 
 # ---------------------------------------------------------------------------

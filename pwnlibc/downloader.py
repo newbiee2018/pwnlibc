@@ -333,6 +333,63 @@ def download_source(version: str, glibc_dir: Path, progress_cb=None,
     return source_dir
 
 
+# The debug_glibc repo stores its prebuilt tarballs as Git-LFS objects: the
+# raw URL serves a small text pointer (which conveniently carries the sha256
+# and size of the real blob), and the media URL serves the blob itself —
+# so a single version can be fetched and verified without cloning the repo.
+DEBUG_GLIBC_REPO = "newbiee2018/debug_glibc"
+
+
+def _parse_lfs_pointer(raw: bytes) -> tuple[str, int] | None:
+    """(sha256, size) from a Git-LFS pointer stub, or None if raw isn't one."""
+    if not raw.startswith(b"version https://git-lfs"):
+        return None
+    sha = None
+    size = None
+    for line in raw.decode("ascii", errors="replace").splitlines():
+        if line.startswith("oid sha256:"):
+            sha = line.split(":", 1)[1].strip()
+        elif line.startswith("size "):
+            try:
+                size = int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    if sha is None or size is None or len(sha) != 64:
+        return None
+    return sha, size
+
+
+def debug_glibc_fetch(version: str, dest: Path) -> Path:
+    """Download one prebuilt debug-glibc tarball from the debug_glibc repo
+    without cloning it: fetch the LFS pointer (sha256 + size of the blob),
+    fetch the blob from the media endpoint, verify both, write to dest.
+
+    Raises RuntimeError when the raw URL stops serving an LFS pointer (repo
+    layout change) or the blob does not match the pointer's hash/size.
+    """
+    pointer_url = (f"https://raw.githubusercontent.com/{DEBUG_GLIBC_REPO}"
+                   f"/main/{version}.tar.gz")
+    blob_url = (f"https://media.githubusercontent.com/media/{DEBUG_GLIBC_REPO}"
+                f"/main/{version}.tar.gz")
+    parsed = _parse_lfs_pointer(_fetch_bytes(pointer_url))
+    if parsed is None:
+        raise RuntimeError(
+            f"{version}.tar.gz on debug_glibc is not a Git-LFS pointer — "
+            f"the repo layout may have changed"
+        )
+    expected_sha, expected_size = parsed
+    blob = _fetch_bytes(blob_url)
+    if (len(blob) != expected_size
+            or hashlib.sha256(blob).hexdigest() != expected_sha):
+        raise RuntimeError(
+            f"SHA256 mismatch for debug_glibc {version}.tar.gz: "
+            f"expected {expected_sha[:16]}… "
+            f"got {hashlib.sha256(blob).hexdigest()[:16]}…"
+        )
+    dest.write_bytes(blob)
+    return dest
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:

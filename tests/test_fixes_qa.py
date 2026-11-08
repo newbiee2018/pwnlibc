@@ -1342,7 +1342,12 @@ class TestSetup:
                 "--glibc-dir", str(glibc_dir), "setup", str(archive_dir),
             ])
 
-        assert result.exit_code == 0
+        # The mocked extractall writes nothing, so the archive lands in the
+        # "unexpected layout" bucket and — per the exit-1-when-nothing-
+        # installed contract — the run exits 1 instead of the old 0.
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "unexpected archive layout" in result.output
         assert fake_tf.extractall.call_count == 2
         assert fake_tf.extractall.call_args_list[0].kwargs.get("filter") == "data"
         assert "filter" not in fake_tf.extractall.call_args_list[1].kwargs

@@ -1520,3 +1520,82 @@ class TestSignatureChecksUnmappedVersionNote:
             "2.55: no suite mapping — signature check not applicable") == 1
         assert "stale" in result.output  # tail of the wrapped parenthetical
         assert "FAIL" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# setup --download: fetch prebuilt tarballs from debug_glibc without cloning
+# ---------------------------------------------------------------------------
+
+def _write_built_tarball(dest, version):
+    """Write a real source-built-layout tarball to dest (as the fetch would)."""
+    import io
+    import tarfile
+    names = [
+        f"{version}/amd64/lib/libc-{version}.so",
+        f"{version}/amd64/lib/libc.a",  # .a file -> detected as 'built'
+    ]
+    with tarfile.open(dest, "w:gz") as tf:
+        for name in names:
+            data = b"fake-elf-bytes" if name.endswith(".so") else b"fake-ar-bytes"
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+
+
+class TestSetupDownload:
+    @patch("pwnlibc.cli.debug_glibc_fetch")
+    def test_setup_download_installs_version(self, mock_fetch, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_fetch.side_effect = lambda version, dest: _write_built_tarball(dest, version)
+
+        result = runner.invoke(cli, ["setup", "--download", "2.23",
+                                     "--target-dir", str(glibc_dir)])
+
+        assert result.exit_code == 0
+        assert mock_fetch.call_args.args[0] == "2.23"
+        assert (glibc_dir / "2.23" / "amd64-built" / "lib" /
+                "libc-2.23.so").is_file()
+        assert "2.23 done" in result.output
+        assert "built" in result.output
+
+    @patch("pwnlibc.cli.debug_glibc_fetch")
+    def test_setup_download_fetch_failure_exits_1(self, mock_fetch, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        mock_fetch.side_effect = RuntimeError(
+            "SHA256 mismatch for debug_glibc 9.99.tar.gz")
+
+        result = runner.invoke(cli, ["setup", "--download", "9.99",
+                                     "--target-dir", str(glibc_dir)])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "9.99" in result.output and "failed" in result.output
+
+    @patch("pwnlibc.cli.debug_glibc_fetch")
+    def test_setup_download_partial_failure_exits_0(self, mock_fetch, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        def fetch(version, dest):
+            if version == "9.99":
+                raise RuntimeError("not a Git-LFS pointer")
+            _write_built_tarball(dest, version)
+            return dest
+
+        mock_fetch.side_effect = fetch
+        result = runner.invoke(cli, ["setup", "--download", "9.99", "2.23",
+                                     "--target-dir", str(glibc_dir)])
+
+        assert result.exit_code == 0
+        assert (glibc_dir / "2.23" / "amd64-built").is_dir()
+
+    def test_setup_download_without_versions_is_usage_error(self, runner, tmp_path):
+        result = runner.invoke(cli, ["setup", "--download",
+                                     "--target-dir", str(tmp_path)])
+        assert result.exit_code == 2
+
+    def test_setup_without_dir_or_download_is_usage_error(self, runner):
+        result = runner.invoke(cli, ["setup"])
+        assert result.exit_code == 2

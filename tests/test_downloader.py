@@ -27,6 +27,8 @@ from pwnlibc.downloader import (
     _extract_dbg_deb,
     _fetch_index,
     _index_urls,
+    _parse_lfs_pointer,
+    debug_glibc_fetch,
     deb_sha256_expected,
     download_glibc,
     download_source,
@@ -1200,3 +1202,62 @@ class TestIndexFetchFailure:
         monkeypatch.setattr(dl, "_fetch_bytes", lambda url: good_index)
         sha2, failed2 = expected_sha256_status(_verify_pkg(), tmp_path)
         assert sha2 == self.GOOD and failed2 is False
+
+
+# ---------------------------------------------------------------------------
+# debug_glibc direct fetch (LFS pointer + media blob, no clone)
+# ---------------------------------------------------------------------------
+
+class TestDebugGlibcFetch:
+    @staticmethod
+    def _pointer(sha: str, size: int) -> bytes:
+        return (
+            b"version https://git-lfs.github.com/spec/v1\n"
+            b"oid sha256:" + sha.encode() + b"\n"
+            b"size " + str(size).encode() + b"\n"
+        )
+
+    def test_parse_lfs_pointer_extracts_sha_and_size(self):
+        sha, size = _parse_lfs_pointer(self._pointer("b" * 64, 123))
+        assert sha == "b" * 64
+        assert size == 123
+
+    def test_parse_lfs_pointer_rejects_non_pointer(self):
+        assert _parse_lfs_pointer(b"\x1f\x8b\x08\x00real gzip bytes") is None
+        assert _parse_lfs_pointer(b"404: Not Found") is None
+
+    @patch("pwnlibc.downloader._fetch_bytes")
+    def test_fetch_downloads_pointer_then_verified_blob(self, mock_fetch, tmp_path):
+        blob = b"\x1f\x8b\x08\x00" + b"tarball-payload" * 100
+        pointer = self._pointer(hashlib.sha256(blob).hexdigest(), len(blob))
+        mock_fetch.side_effect = [pointer, blob]
+
+        dest = tmp_path / "2.23.tar.gz"
+        debug_glibc_fetch("2.23", dest)
+
+        urls = [c.args[0] for c in mock_fetch.call_args_list]
+        assert urls[0] == "https://raw.githubusercontent.com/newbiee2018/debug_glibc/main/2.23.tar.gz"
+        assert urls[1] == "https://media.githubusercontent.com/media/newbiee2018/debug_glibc/main/2.23.tar.gz"
+        assert dest.read_bytes() == blob
+
+    @patch("pwnlibc.downloader._fetch_bytes")
+    def test_fetch_sha_mismatch_raises(self, mock_fetch, tmp_path):
+        blob = b"tampered-bytes"
+        mock_fetch.side_effect = [self._pointer("0" * 64, len(blob)), blob]
+        with pytest.raises(RuntimeError, match="SHA256 mismatch"):
+            debug_glibc_fetch("2.23", tmp_path / "2.23.tar.gz")
+
+    @patch("pwnlibc.downloader._fetch_bytes")
+    def test_fetch_size_mismatch_raises(self, mock_fetch, tmp_path):
+        blob = b"short"
+        mock_fetch.side_effect = [
+            self._pointer(hashlib.sha256(blob).hexdigest(), 10_000), blob]
+        with pytest.raises(RuntimeError, match="SHA256 mismatch"):
+            debug_glibc_fetch("2.23", tmp_path / "2.23.tar.gz")
+
+    @patch("pwnlibc.downloader._fetch_bytes")
+    def test_fetch_non_pointer_response_raises(self, mock_fetch, tmp_path):
+        # repo layout change / moved file: raw URL serves something else
+        mock_fetch.return_value = b"<html>404</html>"
+        with pytest.raises(RuntimeError, match="LFS pointer"):
+            debug_glibc_fetch("9.99", tmp_path / "9.99.tar.gz")
