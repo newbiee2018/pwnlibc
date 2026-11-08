@@ -12,3 +12,5 @@ venv/
 .pytest_cache/
 glibc-2.31/
 TEST_RESULTS.md
+docs/superpowers/
+.superpowers/
