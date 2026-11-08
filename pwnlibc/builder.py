@@ -101,8 +101,11 @@ def _local_source_dir(glibc_dir: Path, version: str) -> Path | None:
     preferred = source_root / f"glibc-{gnu_source_version(version)}"
     if (preferred / "configure").is_file():
         return preferred
+    # Fallback must stay version-matched: a foreign glibc tree (another
+    # version saved under this dir) would build as the WRONG glibc.
+    want = gnu_source_version(version)
     for d in sorted(source_root.iterdir()):
-        if d.is_dir() and (d / "configure").is_file():
+        if d.is_dir() and want in d.name and (d / "configure").is_file():
             return d
     return None
 

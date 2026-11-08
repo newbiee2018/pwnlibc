@@ -557,15 +557,29 @@ class TestLocalSourceDir:
         (other / "configure").write_text("#!/bin/sh\n")
         assert _local_source_dir(glibc_dir, "2.31") == preferred
 
-    def test_falls_back_to_first_dir_with_configure(self, tmp_path):
+    def test_falls_back_to_version_matching_dir_with_configure(self, tmp_path):
         from pwnlibc.builder import _local_source_dir
         glibc_dir = tmp_path / "glibc"
         source = glibc_dir / "2.31" / "source"
-        (source / "aaa").mkdir(parents=True)  # no configure
-        fallback = source / "bbb"
+        (source / "glibc-2.31-incomplete").mkdir(parents=True)  # no configure
+        fallback = source / "glibc-2.31-copy"
         fallback.mkdir()
         (fallback / "configure").write_text("#!/bin/sh\n")
         assert _local_source_dir(glibc_dir, "2.31") == fallback
+
+    def test_foreign_version_tree_not_picked(self, tmp_path):
+        """Exact dir incomplete + a foreign glibc tree present: the fallback
+        must return None (fall back to downloading), never build the foreign
+        version as this one."""
+        from pwnlibc.builder import _local_source_dir
+        glibc_dir = tmp_path / "glibc"
+        source = glibc_dir / "2.31" / "source"
+        partial = source / "glibc-2.31"
+        partial.mkdir(parents=True)  # incomplete: no configure
+        foreign = source / "glibc-2.35"
+        foreign.mkdir()
+        (foreign / "configure").write_text("#!/bin/sh\n")
+        assert _local_source_dir(glibc_dir, "2.31") is None
 
     def test_no_configure_means_none(self, tmp_path):
         from pwnlibc.builder import _local_source_dir
