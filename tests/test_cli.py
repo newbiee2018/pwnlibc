@@ -1357,3 +1357,67 @@ class TestBuildAndSourceDownloadExitSemantics:
         ])
         assert result.exit_code == 0
         mock_check.assert_not_called()
+
+
+
+class TestDownloadLatestArchScoping:
+    """latest-derived versions stay scoped to the arch they resolved for."""
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_diverging_arches_scoped(self, mock_scrape, mock_dl, tmp_path):
+        """amd64 latest 2.43 / i686 latest 2.39: exactly the two requested
+        (version, arch) pairs download — the i686 version must not leak onto
+        amd64 (and vice versa)."""
+        mock_scrape.return_value = [
+            _mk_pkg("2.39-0ubuntu8.3_amd64"),
+            _mk_pkg("2.43-1ubuntu1_amd64"),
+            _mk_pkg("2.39-0ubuntu8.3_i386", arch="i686"),
+            _mk_pkg("2.35-0ubuntu3_i386", arch="i686"),
+        ]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--no-source",
+        ])
+        assert result.exit_code == 0
+        downloaded = {(c.args[0].version, c.args[0].arch)
+                      for c in mock_dl.call_args_list}
+        assert downloaded == {("2.43", "amd64"), ("2.39", "i686")}
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_equal_versions_dedupe_per_arch(self, mock_scrape, mock_dl, tmp_path):
+        """Both arches resolving to the same version downloads it once per
+        arch — deduped as a version, not as a pair."""
+        mock_scrape.return_value = [
+            _mk_pkg("2.39-0ubuntu8.3_amd64"),
+            _mk_pkg("2.35-0ubuntu3_amd64"),
+            _mk_pkg("2.39-0ubuntu8.3_i386", arch="i686"),
+            _mk_pkg("2.35-0ubuntu3_i386", arch="i686"),
+        ]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "--no-source",
+        ])
+        assert result.exit_code == 0
+        downloaded = {(c.args[0].version, c.args[0].arch)
+                      for c in mock_dl.call_args_list}
+        assert downloaded == {("2.39", "amd64"), ("2.39", "i686")}
+
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_download_latest_explicit_token_widens_scope(self, mock_scrape, mock_dl, tmp_path):
+        """`latest 2.43` with latest(amd64)->2.43: the explicit token still
+        covers every requested arch (i686/2.43 is not dropped)."""
+        mock_scrape.return_value = [
+            _mk_pkg("2.43-1ubuntu1_amd64"),
+            _mk_pkg("2.43-1ubuntu1_i386", arch="i686"),
+        ]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "latest", "2.43", "--no-source",
+        ])
+        assert result.exit_code == 0
+        downloaded = {(c.args[0].version, c.args[0].arch)
+                      for c in mock_dl.call_args_list}
+        assert downloaded == {("2.43", "amd64"), ("2.43", "i686")}

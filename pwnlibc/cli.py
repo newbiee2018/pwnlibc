@@ -1234,15 +1234,28 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
     chain_packages = _auto_chain_only(all_packages) if mirror == "auto" else all_packages
 
     # `latest` is a token, not a version: expand the argument list once,
-    # after chain filtering, into per-arch resolved versions. Resolved
-    # versions then flow through the download loop exactly like explicit
-    # ones (best-pick, source download, signature checks, ownership repair).
+    # after chain filtering, into (version, arches-scope) pairs. A
+    # latest-derived version belongs only to the arch it was resolved for;
+    # an explicit token covers all requested arches. Repeated tokens MERGE
+    # their scopes (insertion order kept), so `latest` resolving to the
+    # same version on two arches downloads that version once per arch —
+    # and a resolved version never leaks onto an arch that did not ask
+    # for it. Announce lines are unchanged.
     if "latest" in versions:
-        expanded: list[str] = []
+        expanded: list[list] = []  # [version, scope] pairs; scope is shared
+        scopes: dict[str, list[str]] = {}
+
+        def _add(version: str, scope: list[str]) -> None:
+            if version in scopes:
+                merged = scopes[version]
+                merged.extend(a for a in scope if a not in merged)
+            else:
+                scopes[version] = list(scope)
+                expanded.append([version, scopes[version]])
+
         for arg in versions:
             if arg != "latest":
-                if arg not in expanded:
-                    expanded.append(arg)
+                _add(arg, archs_to_download)
                 continue
             resolved = _resolve_latest(chain_packages, archs_to_download)
             for arch in archs_to_download:
@@ -1254,22 +1267,23 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
                     )
                     continue
                 console.print(f"[cyan]latest[/cyan] ({arch}) → [bold]{version}[/bold]")
-                if version not in expanded:
-                    expanded.append(version)
-        versions = expanded
+                _add(version, [arch])
+        scoped: list[tuple[str, list[str]]] = [(v, s) for v, s in expanded]
+    else:
+        scoped = [(v, archs_to_download) for v in versions]
 
     any_success = False
     used_pkgs: list[DebPackage] = []
-    for version in versions:
+    for version, version_arches in scoped:
         matching = [
             p for p in chain_packages
-            if p.version == version and p.arch in archs_to_download
+            if p.version == version and p.arch in version_arches
         ]
 
         if not matching:
             tried = ", ".join(sorted(mirrors_to_try))
-            msg = f"{version} ({', '.join(archs_to_download)}): not found on mirrors ({tried})"
-            hint_arches, hint_mirrors = _where_is_version(version, mirrors_to_try, archs_to_download)
+            msg = f"{version} ({', '.join(version_arches)}): not found on mirrors ({tried})"
+            hint_arches, hint_mirrors = _where_is_version(version, mirrors_to_try, version_arches)
             if hint_arches:
                 msg += f" — exists for {', '.join(hint_arches)}, retry with --arch"
             elif hint_mirrors:
