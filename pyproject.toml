@@ -34,7 +34,7 @@ Homepage = "https://github.com/newbiee2018/pwnlibc"
 pwnlibc = "pwnlibc.cli:cli"
 
 [tool.setuptools]
-# Explicit list: keeps tests/ and the debug_glibc submodule out of the wheel
+# Explicit list: keeps tests/ out of the wheel
 packages = ["pwnlibc"]
 
 [tool.setuptools.dynamic]
