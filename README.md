@@ -53,7 +53,7 @@ python3 -m pip install --user --break-system-packages --editable /path/to/pwnlib
 
 The `pwnlibc` command lands in `~/.local/bin` (add it to PATH if needed). Uninstall with `python3 -m pip uninstall pwnlibc`. `bash install.sh` picks the best method automatically: pipx when present, then pip `--user` (editable), then a legacy `.pth` path-hook fallback that needs no pip at all — and it cleans up artifacts older versions of the script left behind.
 
-Or run the repo installer, which prompts for the glibc data directory once (Enter accepts `~/pwnlibc`), persists your choice, and then uses pipx when available (falling back to the legacy `.pth` method, cleaning up any old wrapper it previously created):
+Or run the repo installer, which prompts for the glibc data directory once (Enter accepts `~/pwnlibc`, or an existing `/glibc`), persists your choice, and then installs the command the same way as above: pipx when available, then pip `--user` (editable), then the legacy `.pth` method — cleaning up the wrapper and path hook older versions of the script left behind:
 
 ```bash
 cd pwnlibc/
@@ -104,6 +104,13 @@ sudo pwnlibc build 2.31 --arch amd64
 Run `pwnlibc --version` to print the tool version, `pwnlibc --help` (or
 `pwnlibc help`) for the full command list.
 
+`sudo` is only needed when the glibc directory isn't writable by your user
+(e.g. `/opt/glibc`). After a `sudo pwnlibc download|download-all|build|source
+download`, file ownership is handed back to the invoking user (`SUDO_USER`), so
+later unprivileged commands keep working. On the default `~/pwnlibc` created
+by `install.sh`, no sudo is needed at all — the Quick start uses it only
+because system-wide directories are a common setup.
+
 ## Commands
 
 ### `pwnlibc list`
@@ -151,11 +158,13 @@ Downloads `libc6` and `libc6-dbg` `.deb` packages, extracts them, and installs t
 
 `latest` is a token, not a version: it resolves per target arch to the newest glibc in that arch's own mirror chain, announcing each resolution (`latest (amd64) → 2.39`) before downloading. It respects `--arch` and `--mirror` (with an explicit mirror, `latest` is the newest version in that mirror's catalog) and dedupes against explicit versions, so `download 2.39 latest` installs 2.39 once. An arch whose package list came back empty reports `latest (arch): no packages found on mirrors (...)` and counts as a failure.
 
-Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`. Each installed line reports the mirror it came from, and Ubuntu/Debian package revisions are never compared across distributions — the origin shown by `available` is the origin `download` uses and `verify` checks against.
+Mirror auto-selection: x86 from `archive.ubuntu.com`, non-x86 from `ports.ubuntu.com`, powerpc from `old-releases.ubuntu.com`. Automatically tries fallback mirrors (e.g. `old-releases` for EOL versions). Override with `--mirror`; a `tsinghua` mirror (TUNA, same Ubuntu pool) is also available for fast access in China. Each installed line reports the mirror it came from, and Ubuntu/Debian package revisions are never compared across distributions — the origin shown by `available` is the origin `download` uses and `verify` checks against.
 
-Integrity: every downloaded `.deb` is checked against the SHA256 recorded in the owning suite's `Packages` index (`<mirror>/dists/<suite>/main/binary-<arch>/Packages.xz`); a mismatch deletes the file and aborts that version. Indices are cached under `<glibc-dir>/.cache/indices/` for 7 days. Files no index lists (EOL leftovers like trusty-era debs, or superseded revisions) are downloaded without verification. All mirrors are fetched over HTTPS.
+Integrity: every downloaded `.deb` is checked against the SHA256 recorded in the owning suite's `Packages` index (`<mirror>/dists/<suite>/main/binary-<arch>/Packages.xz`); a mismatch deletes the file and aborts that version. Indices are cached under `<glibc-dir>/.cache/indices/` for 7 days. Files no index lists (EOL leftovers like trusty-era debs, or superseded revisions) are downloaded without verification — a stderr warning is printed (once per run) when a version has no suite mapping at all or its index could not be fetched, so an unverified download is never silent. All mirrors are fetched over HTTPS.
 
-Signature verification (opt-in): `--verify-signatures` adds a layer above the deb hashes — after the run, each cached `Packages` index it used is compared against the SHA256 listed in the suite's GPG-signed `InRelease` (or `Release` + `Release.gpg`) file, which is itself verified with `gpgv` against the distro archive keyring. Requires `gpgv` (`sudo apt install gnupg`) and a keyring (`ubuntu-archive-keyring` / `debian-archive-keyring`, or `--keyring PATH`, or `$PWNLIBC_KEYRING`); a missing tool or keyring only downgrades that check to a warning, but an actual index/signature mismatch exits with status 1.
+Signature verification (opt-in): `--verify-signatures` adds a layer above the deb hashes — after the run, each cached `Packages` index it used is compared against the SHA256 listed in the suite's GPG-signed `InRelease` (or `Release` + `Release.gpg`) file, which is itself verified with `gpgv` against the distro archive keyring. Requires `gpgv` (`sudo apt install gnupg`) and a keyring (`ubuntu-archive-keyring` / `debian-archive-keyring`, or `--keyring PATH`, or `$PWNLIBC_KEYRING`); a missing tool or keyring only downgrades that check to a warning, but an actual index/signature mismatch exits with status 1. Versions with no suite mapping (EOL leftovers) get a yellow `no suite mapping — signature check not applicable` note and do not count as failures.
+
+`download`, `download-all`, `build`, and `source download` exit with status 1 when nothing succeeded (every requested version failed or was unavailable), so scripts and CI can detect a no-op run.
 
 ```bash
 pwnlibc download 2.31 --verify-signatures              # also check the signed Release
@@ -191,7 +200,7 @@ If `<glibc-dir>/<version>/source/` already holds a real source tree (one with
 a `configure` script — e.g. from `pwnlibc source download` or a previous
 build), it is reused in place and the ftp.gnu.org tarball download is skipped,
 so builds work fully offline. `--timeout SECONDS` caps the `make` step
-(default 1800; `0` disables the cap).
+(default 1800; `0` disables the cap; negative values are rejected).
 
 Creates a separate `<arch>-built` variant under `<glibc-dir>/<version>/`. This coexists with deb-installed versions — use `pwnlibc patch --variant built` to select it, or let `--variant auto` (default) pick the deb first.
 
@@ -227,6 +236,7 @@ pwnlibc patch ./vuln -v 2.31                         # inplace mode (default)
 pwnlibc patch ./vuln -v 2.27 -m copy                 # copy mode
 pwnlibc patch ./vuln -v 2.27 -a i686                 # force 32-bit
 pwnlibc patch ./vuln -v 2.31 --variant built          # use source-built variant
+pwnlibc patch ./vuln -v 2.31 --no-rpath               # don't set RPATH
 ```
 
 **Variant selection** (`--variant auto|deb|built`):
@@ -282,7 +292,7 @@ pwnlibc verify --fix          # re-download mismatched/missing files
 
 Only verifies `deb` variant installs (not source-built ones). By default only shows problems (MISSING/MISMATCH); use `-v` to see all entries. Exits with status 1 when problems are found (or, with `--fix`, when a fix attempt fails) so scripts and CI can detect failures. The cached reference `.deb` is also validated against the dists SHA256 before file contents are compared — a tampered or truncated cache entry is reported as an error (and removed) instead of silently producing MISMATCH rows; when no index pins the deb, verification falls back to content comparison as before.
 
-`--verify-signatures` (opt-in) additionally checks each `Packages` index used against the GPG-signed `InRelease`/`Release` of its suite (`gpgv` + distro archive keyring; see `pwnlibc download`). Missing `gpgv`/keyring downgrades the check to a warning; an index hash or signature mismatch makes `verify` exit 1 like any other problem. `--keyring PATH` selects the trusted keyring (`$PWNLIBC_KEYRING` also works).
+`--verify-signatures` (opt-in) additionally checks each `Packages` index used against the GPG-signed `InRelease`/`Release` of its suite (`gpgv` + distro archive keyring; see `pwnlibc download`). Missing `gpgv`/keyring downgrades the check to a warning; an index hash or signature mismatch makes `verify` exit 1 like any other problem. `--keyring PATH` selects the trusted keyring (`$PWNLIBC_KEYRING` also works). By default mirrors are picked per arch like `download`; pass `--mirror` to pin one.
 
 ```bash
 pwnlibc verify --verify-signatures      # also check signed Release files
@@ -438,9 +448,11 @@ pwnlibc/
 │   ├── glibc.py           # glibc install discovery and path resolution
 │   ├── patcher.py         # patchelf operations (copy + inplace modes)
 │   ├── downloader.py      # mirror scraping, .deb download/extract, verify
+│   ├── signatures.py      # gpgv InRelease/Release signature checks
 │   ├── builder.py         # source download, configure, cross-compile
+│   ├── ownership.py       # chown tree back to SUDO_USER after sudo writes
 │   └── backup.py          # backup/restore logic
-├── tests/                 # pytest suite (650+ tests)
+├── tests/                 # pytest suite (790+ tests)
 ├── pyproject.toml         # packaging metadata + pwnlibc console script
 ├── requirements.txt
 ├── install.sh
