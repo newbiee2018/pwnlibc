@@ -1469,3 +1469,28 @@ class TestKeyringTildeExpansion:
         assert result.exit_code == 0
         assert mock_sig.call_args[0][2] == home / "kr.gpg"
         assert str(mock_sig.call_args[0][2]).startswith(str(home))
+
+
+class TestBuildTimeoutRange:
+    """--timeout is documented as SECONDS with 0 = off; negatives are a
+    usage error, not a silent cap-disabler."""
+
+    def test_negative_timeout_rejected(self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "build", "2.31", "--arch", "amd64", "--timeout", "-5",
+        ])
+        assert result.exit_code == 2  # click usage error
+        assert "timeout" in result.output.lower()
+
+    def test_zero_timeout_accepted(self, runner, tmp_path):
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+        with patch("pwnlibc.builder.check_build_deps", return_value=[]):
+            result = runner.invoke(cli, [
+                "--glibc-dir", str(glibc_dir),
+                "build", "2.31", "--arch", "amd64", "--timeout", "0",
+            ])
+        assert result.exit_code != 2  # parsed fine (fails later on source)

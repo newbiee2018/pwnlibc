@@ -1472,8 +1472,8 @@ def download_all(ctx, arch, mirror, with_dbg, source, check, verify_signatures, 
 @click.argument("versions", nargs=-1, required=True)
 @click.option("--arch", type=click.Choice(ALL_ARCHES), required=True,
               help="Target architecture.")
-@click.option("--timeout", type=int, default=1800, metavar="SECONDS",
-              help="make timeout; 0 disables.")
+@click.option("--timeout", type=click.IntRange(min=0), default=1800,
+              metavar="SECONDS", help="make timeout in seconds; 0 disables.")
 @click.pass_context
 def build(ctx, versions, arch, timeout):
     """Build glibc from source with debug symbols (-g3).
