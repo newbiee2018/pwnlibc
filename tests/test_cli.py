@@ -1446,3 +1446,26 @@ class TestMaybeDownloadSourceUnreadableDir:
         assert result.exception is None
         mock_dl.assert_called_once()  # the deb install itself succeeded
         assert "denied" in result.output  # surfaced as a Source: warning
+
+
+class TestKeyringTildeExpansion:
+    """--keyring ~/kr.gpg must expand like $PWNLIBC_KEYRING does."""
+
+    def test_keyring_tilde_expanded(self, runner, tmp_path, monkeypatch):
+        import os
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        with patch("pwnlibc.cli._run_signature_checks", return_value=True) as mock_sig, \
+                patch("pwnlibc.cli.download_glibc"), \
+                patch("pwnlibc.cli._scrape_mirrors",
+                      return_value=[_mk_pkg("2.31-0ubuntu9.16_amd64")]):
+            result = runner.invoke(cli, [
+                "--glibc-dir", str(tmp_path),
+                "download", "2.31", "--no-source", "--verify-signatures",
+                "--keyring", "~/kr.gpg",
+            ])
+        assert result.exit_code == 0
+        assert mock_sig.call_args[0][2] == home / "kr.gpg"
+        assert str(mock_sig.call_args[0][2]).startswith(str(home))

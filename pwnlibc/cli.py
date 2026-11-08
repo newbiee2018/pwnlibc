@@ -66,6 +66,12 @@ class _HelpGroup(click.Group):
         return super().parse_args(ctx, args)
 
 
+def _expanduser_path(ctx, param, value):
+    """click callback: expand ~ in path options (e.g. --keyring ~/kr.gpg),
+    matching the $PWNLIBC_KEYRING env handling."""
+    return Path(os.path.expanduser(value)) if value is not None else None
+
+
 def _ensure_writable(glibc_dir: Path) -> None:
     if not glibc_dir.exists():
         try:
@@ -1199,7 +1205,8 @@ def _maybe_download_source(glibc_dir: Path, version: str) -> None:
 @click.option("--verify-signatures", is_flag=True,
               help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
 @click.option("--keyring", type=click.Path(path_type=Path), default=None,
-              help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
+              callback=_expanduser_path,
+              help="Trusted keyring for --verify-signatures (default: distro archive keyring). ~ is expanded.")
 @click.pass_context
 def download(ctx, versions, arch, mirror, with_dbg, source,
              verify_signatures, keyring):
@@ -1363,7 +1370,8 @@ def download(ctx, versions, arch, mirror, with_dbg, source,
 @click.option("--verify-signatures", is_flag=True,
               help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
 @click.option("--keyring", type=click.Path(path_type=Path), default=None,
-              help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
+              callback=_expanduser_path,
+              help="Trusted keyring for --verify-signatures (default: distro archive keyring). ~ is expanded.")
 @click.pass_context
 def download_all(ctx, arch, mirror, with_dbg, source, check, verify_signatures, keyring):
     """Download all available glibc versions for the given arch(es).
@@ -1555,7 +1563,8 @@ def build(ctx, versions, arch, timeout):
 @click.option("--verify-signatures", is_flag=True,
               help="After the run, check each Packages index used against the GPG-signed InRelease/Release (gpgv).")
 @click.option("--keyring", type=click.Path(path_type=Path), default=None,
-              help="Trusted keyring for --verify-signatures (default: distro archive keyring).")
+              callback=_expanduser_path,
+              help="Trusted keyring for --verify-signatures (default: distro archive keyring). ~ is expanded.")
 @click.pass_context
 def verify(ctx, fix, verbose, mirror, verify_signatures, keyring):
     """Verify installed glibc against official Ubuntu packages.
