@@ -1421,3 +1421,28 @@ class TestDownloadLatestArchScoping:
         downloaded = {(c.args[0].version, c.args[0].arch)
                       for c in mock_dl.call_args_list}
         assert downloaded == {("2.43", "amd64"), ("2.43", "i686")}
+
+
+class TestMaybeDownloadSourceUnreadableDir:
+    """An unreadable (e.g. root-owned 700) source dir must not crash the
+    download loop — the source step is best-effort by contract."""
+
+    @patch("pwnlibc.cli.source_present",
+           side_effect=PermissionError("denied"))
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.downloader._fetch_index")
+    def test_unreadable_source_dir_warns_not_crashes(
+            self, mock_fetch, mock_dl, mock_present, runner, tmp_path):
+        from tests.conftest import SAMPLE_MIRROR_HTML
+        mock_fetch.return_value = SAMPLE_MIRROR_HTML
+        glibc_dir = tmp_path / "glibc"
+        glibc_dir.mkdir()
+
+        result = runner.invoke(cli, [
+            "--glibc-dir", str(glibc_dir),
+            "download", "2.31", "--arch", "amd64", "--no-dbg",
+        ])
+        assert result.exit_code == 0
+        assert result.exception is None
+        mock_dl.assert_called_once()  # the deb install itself succeeded
+        assert "denied" in result.output  # surfaced as a Source: warning

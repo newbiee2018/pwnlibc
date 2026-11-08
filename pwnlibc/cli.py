@@ -1168,10 +1168,12 @@ def _maybe_download_source(glibc_dir: Path, version: str) -> None:
     from .builder import check_source_available
 
     src_dir = glibc_dir / version / "source"
-    if source_present(src_dir):
-        return
-    console.print(f"[dim]Downloading source for {version}...[/dim]")
     try:
+        # The presence scan too: an unreadable (root-owned 700) dir raises
+        # PermissionError and must warn, not crash the download loop.
+        if source_present(src_dir):
+            return
+        console.print(f"[dim]Downloading source for {version}...[/dim]")
         url = check_source_available(version)
         if url is None:
             console.print(f"[yellow]Source: not available on ftp.gnu.org for {version}[/yellow]")
