@@ -1494,3 +1494,29 @@ class TestBuildTimeoutRange:
                 "build", "2.31", "--arch", "amd64", "--timeout", "0",
             ])
         assert result.exit_code != 2  # parsed fine (fails later on source)
+
+
+class TestSignatureChecksUnmappedVersionNote:
+    """--verify-signatures must not be silent for versions with no suite
+    mapping: one yellow note per unique version, never a failure."""
+
+    @patch("pwnlibc.cli.chown_tree", return_value=0)
+    @patch("pwnlibc.cli.download_glibc")
+    @patch("pwnlibc.cli._scrape_mirrors")
+    def test_unmapped_version_gets_a_note_not_silence(
+            self, mock_scrape, mock_dl, mock_chown, tmp_path):
+        mock_scrape.return_value = [
+            _mk_pkg("2.55-1ubuntu1_amd64"),
+            _mk_pkg("2.55-1ubuntu1_i386", arch="i686"),
+        ]
+        result = CliRunner().invoke(cli, [
+            "--glibc-dir", str(tmp_path),
+            "download", "2.55", "--no-source", "--verify-signatures",
+        ])
+        assert result.exit_code == 0
+        assert result.exception is None
+        # one note per unique version, not one per (version, arch) package
+        assert result.output.count(
+            "2.55: no suite mapping — signature check not applicable") == 1
+        assert "stale" in result.output  # tail of the wrapped parenthetical
+        assert "FAIL" not in result.output

@@ -108,17 +108,31 @@ def _run_signature_checks(pkgs: list[DebPackage], glibc_dir: Path,
     cache_dir = glibc_dir / ".cache"
     triples: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
+    unmapped: list[str] = []  # versions no suite maps (unique, first-seen order)
     for pkg in pkgs:
         deb_arch = ARCH_INFO.get(pkg.arch, {}).get("deb_arch")
         if deb_arch is None:
             continue
-        for suite in _candidate_suites(pkg):
+        suites = _candidate_suites(pkg)
+        if not suites:
+            if pkg.version not in unmapped:
+                unmapped.append(pkg.version)
+            continue
+        for suite in suites:
             triple = (pkg.mirror, suite, deb_arch)
             if triple not in seen:
                 seen.add(triple)
                 triples.append(triple)
 
+    def _note_unmapped() -> None:
+        for version in unmapped:
+            console.print(
+                f"  [yellow]note[/yellow] {version}: no suite mapping — "
+                f"signature check not applicable (suite map may be stale)"
+            )
+
     if not triples:
+        _note_unmapped()
         return True
 
     console.print(f"[bold]Verifying Packages indices against signed Release files"
@@ -157,6 +171,8 @@ def _run_signature_checks(pkgs: list[DebPackage], glibc_dir: Path,
             # At least one verdict is None — the check did not fully run.
             detail = f" [dim]({'; '.join(check.notes)})[/dim]" if check.notes else ""
             console.print(f"  [yellow]skipped[/yellow] {label}{detail}")
+
+    _note_unmapped()
     return ok
 
 
